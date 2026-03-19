@@ -52,6 +52,37 @@ class _WebHandler(BaseHTTPRequestHandler):
         relative = path.removeprefix("/")
         return self._serve_file(self.static_dir / relative)
 
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        if path != "/api/manual-command":
+            self._safe_send_error(HTTPStatus.NOT_FOUND)
+            return
+
+        content_length = int(self.headers.get("Content-Length") or "0")
+        raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        player_id = payload.get("player_id", 2)
+        try:
+            player_id = int(player_id)
+        except (TypeError, ValueError):
+            player_id = 2
+        command_payload = payload.get("command") if isinstance(payload.get("command"), dict) else payload
+        self.coordinator.update_manual_command(player_id, command_payload)
+        body = b'{"ok":true}'
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self._safe_write(body)
+
     def _serve_file(self, file_path: Path) -> None:
         base = self.assets_dir if str(file_path).startswith(str(self.assets_dir)) else self.static_dir
 

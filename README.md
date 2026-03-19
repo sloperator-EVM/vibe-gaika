@@ -6,3 +6,9 @@
 - `local-runner/` — локальный раннер серии матчей
 - `participant_bot_template/` — шаблон участника с `CombatBot`
 - `scripts/start_browser_match.py` — быстрый запуск web-port и двух ботов
+
+
+Режимы браузерного запуска:
+
+- `bot-vs-bot` — бот против бота.
+- `bot-vs-human` — бот против игрока №2 в браузере (`WASD`, `←/→`, `↑`).

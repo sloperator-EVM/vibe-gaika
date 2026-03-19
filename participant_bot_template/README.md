@@ -34,3 +34,20 @@ python scripts/start_browser_match.py \
   --bot-a-cmd "{python} participant_bot_template/main.py {host} {port}" \
   --bot-b-cmd "{python} participant_bot_template/main.py {host} {port}"
 ```
+
+
+## Режимы браузерного запуска
+
+Бот против самого себя:
+
+```bash
+python scripts/start_browser_match.py --mode bot-vs-bot
+```
+
+Бот против человека как второго игрока:
+
+```bash
+python scripts/start_browser_match.py --mode bot-vs-human
+```
+
+Управление человеком во втором режиме: `WASD` — движение, `←/→` — поворот, `↑` — выстрел.
