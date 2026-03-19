@@ -4,5 +4,5 @@
 
 - `game/` — браузерный запуск игры и web-port
 - `local-runner/` — локальный раннер серии матчей
-- `participant_bot_template/` — AI-oriented шаблон участника с `AIBot`
+- `participant_bot_template/` — шаблон участника с `CombatBot`
 - `scripts/start_browser_match.py` — быстрый запуск web-port и двух ботов
