@@ -16,8 +16,8 @@ def _build_cmd(template: str, host: str, port: int) -> list[str]:
 
 def parse_args() -> argparse.Namespace:
     repo_root = Path(__file__).resolve().parents[1]
-    default_bot_a = "{python} participant_bot_template/main.py {host} {port}"
-    default_bot_b = "{python} participant_bot_template/main.py {host} {port}"
+    default_bot_a = "{python} gaica_bot_v5/main.py {host} {port}"
+    default_bot_b = "{python} gaica_bot_v5/main.py {host} {port}"
 
     parser = argparse.ArgumentParser(description="Start GAICA web UI and launch two socket bots")
     parser.add_argument("--bot-host", default="127.0.0.1")
