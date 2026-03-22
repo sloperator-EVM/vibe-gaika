@@ -313,22 +313,46 @@ class SmartBot:
                 tti = max(0.0, ahead) / speed
                 threats.append((p, p_dir, ahead, lateral, tti))
 
-        if not threats: return Vec2()
+        enemy = message.enemy
+        enemy_w = getattr(enemy, "weapon", None)
+        enemy_armed = bool(
+            enemy.alive
+            and enemy_w is not None
+            and getattr(enemy_w, "weapon_type", "none").lower() != "none"
+            and getattr(enemy_w, "ammo", 0) > 0
+        )
+        # Превентивная угроза по прицелу врага: помогает уклоняться до появления пули.
+        if enemy_armed and enemy.position.distance_to(me.position) < 360.0:
+            enemy_face = self._safe_direction(
+                enemy.facing,
+                fallback=Vec2(me.position.x - enemy.position.x, me.position.y - enemy.position.y),
+            )
+            to_me = Vec2(me.position.x - enemy.position.x, me.position.y - enemy.position.y)
+            ahead = to_me.x * enemy_face.x + to_me.y * enemy_face.y
+            lateral = abs(to_me.x * (-enemy_face.y) + to_me.y * enemy_face.x)
+            if 0.0 < ahead < 360.0 and lateral < 34.0 and self._has_clear_shot(message, enemy.position, me.position):
+                synthetic = type("AimThreat", (), {"position": enemy.position, "velocity": Vec2(enemy_face.x * 620.0, enemy_face.y * 620.0)})
+                threats.append((synthetic, enemy_face, ahead, lateral, ahead / 620.0))
+
+        if not threats:
+            return Vec2()
 
         best_move = Vec2(0.0, 0.0)
         best_score = -float('inf')
         
         candidates = [
-            Vec2(0,0),
             Vec2(1,0), Vec2(-1,0), Vec2(0,1), Vec2(0,-1),
-            Vec2(0.707, 0.707), Vec2(-0.707, 0.707), Vec2(0.707, -0.707), Vec2(-0.707, -0.707)
+            Vec2(0.707, 0.707), Vec2(-0.707, 0.707), Vec2(0.707, -0.707), Vec2(-0.707, -0.707),
+            Vec2(0.924, 0.383), Vec2(-0.924, 0.383), Vec2(0.924, -0.383), Vec2(-0.924, -0.383),
+            Vec2(0.383, 0.924), Vec2(-0.383, 0.924), Vec2(0.383, -0.924), Vec2(-0.383, -0.924),
+            Vec2(0, 0),
         ]
 
         for cand in candidates:
             # Проверяем позицию на нескольких горизонтах, а не только "следующий кадр".
             score = 0.0
             blocked = False
-            for horizon in (18.0, 32.0, 50.0):
+            for horizon in (14.0, 26.0, 40.0, 58.0):
                 test_x = me.position.x + cand.x * horizon
                 test_y = me.position.y + cand.y * horizon
                 cx, cy = int(test_x // self.cell_size), int(test_y // self.cell_size)
@@ -350,19 +374,19 @@ class SmartBot:
 
                 if math.isinf(min_lateral):
                     min_lateral = 99.0
-                score += min_lateral + min_tti * 120.0
+                score += min_lateral * 1.3 + min_tti * 140.0
 
                 # Доп. штраф у края карты: в уклонении выбираем более "глубокие" позиции.
                 edge_margin = min(test_x, self.map_w - test_x, test_y, self.map_h - test_y)
-                if edge_margin < 28.0:
-                    score -= (28.0 - edge_margin) * 3.0
+                if edge_margin < 42.0:
+                    score -= (42.0 - edge_margin) * 5.5
 
             if blocked:
                 continue
 
             # Небольшой штраф стоять на месте при угрозе.
             if cand.length() < 1e-6:
-                score -= 10.0
+                score -= 30.0
 
             if score > best_score:
                 best_score = score
@@ -374,7 +398,7 @@ class SmartBot:
             handedness = -1.0 if (to_me.x * (-p_dir.y) + to_me.y * p_dir.x) > 0 else 1.0
             return Vec2(-p_dir.y * handedness, p_dir.x * handedness).normalized()
 
-        return best_move
+        return best_move.normalized() if best_move.length() > 1e-6 else Vec2()
 
     def _danger_from_bullets(self, message: TickMessage, pos: Vec2, horizon: float = 320.0) -> tuple[int, float]:
         danger = 0
@@ -558,16 +582,27 @@ class SmartBot:
                             wp = self._find_path_info(me.position, target_pos, impassable.copy(), costs)
                             to_pickup_dir = Vec2(wp.x - me.position.x, wp.y - me.position.y).normalized()
                             
-                            if has_weapon and enemy.alive:
-                                combat_move = self._distance_control_move(enemy_dir, enemy_distance, 90.0, 0.7, seq)
-                                move = self._blend(to_pickup_dir, combat_move, 0.4)
-                            else: move = to_pickup_dir
+                            if has_weapon and enemy.alive and not isinstance(nearby_pickup, DummyPickup):
+                                combat_move = self._distance_control_move(enemy_dir, enemy_distance, 105.0, 0.75, seq)
+                                move = self._blend(to_pickup_dir, combat_move, 0.35)
+                            else:
+                                move = to_pickup_dir
                             
-                            if me.position.distance_to(target_pos) <= 22.0:
+                            if isinstance(nearby_pickup, DummyPickup) and me.position.distance_to(target_pos) <= 36.0:
+                                to_box = Vec2(target_pos.x - me.position.x, target_pos.y - me.position.y)
+                                if to_box.length() > 1e-6:
+                                    aim = to_box.normalized()
+                                move = Vec2(0.0, 0.0)
+                                if me.kick_cooldown <= 0.05:
+                                    self.resupply_focus_ticks = 3
+                                    self.resupply_focus_pos = Vec2(target_pos.x, target_pos.y)
+                                    kick = True
+                                    pickup = False
+                            elif me.position.distance_to(target_pos) <= 22.0:
                                 # Для ящика пополнения (letterbox) используем удар ногой.
                                 if isinstance(nearby_pickup, DummyPickup):
                                     if me.kick_cooldown <= 0.05:
-                                        self.resupply_focus_ticks = 2
+                                        self.resupply_focus_ticks = 3
                                         self.resupply_focus_pos = Vec2(target_pos.x, target_pos.y)
                                         kick = True
                                 else:
@@ -587,7 +622,7 @@ class SmartBot:
                             move = Vec2(st.x * 0.2, st.y * 0.2)
 
                 if has_weapon and move.length() < 0.1: 
-                    preferred_distance = 110.0
+                    preferred_distance = 122.0
                     if "uzi" in weapon_type:
                         if "revolver" in enemy_w_type and getattr(enemy, 'shoot_cooldown', 0.0) > 0.1:
                             preferred_distance = 75.0
@@ -605,9 +640,9 @@ class SmartBot:
                         move = self._distance_control_move(enemy_dir, enemy_distance, preferred_distance, 0.75, seq)
 
                     # Не подходим слишком близко к вооруженному противнику — оставляем себе пространство для dodge.
-                    if enemy.alive and enemy_armed and enemy_distance < 58.0:
+                    if enemy.alive and enemy_armed and enemy_distance < 72.0:
                         retreat = Vec2(-enemy_dir.x, -enemy_dir.y)
-                        move = self._blend(retreat, self._strafe(enemy_dir, 1.0 if seq % 2 else -1.0), 0.35)
+                        move = self._blend(retreat, self._strafe(enemy_dir, 1.0 if seq % 2 else -1.0), 0.28)
                     
                     if nearby_pickup is not None and self._should_upgrade_weapon(weapon_type, my_ammo, nearby_pickup):
                         target_pos = getattr(nearby_pickup, 'position', None)
@@ -746,6 +781,14 @@ class SmartBot:
                     move = self._blend(move if move.length() > 0.1 else pre_dodge, pre_dodge, 0.6)
                     if enemy_distance < 75.0:
                         shoot = False
+
+            # Глобальный hard-stop по дистанции: к вооруженному противнику не подходим вплотную.
+            if enemy.alive and enemy_armed and enemy_distance < 68.0 and not kick:
+                retreat = Vec2(-enemy_dir.x, -enemy_dir.y)
+                strafe = self._strafe(enemy_dir, 1.0 if (seq // 10) % 2 == 0 else -1.0)
+                move = self._blend(retreat, strafe, 0.24)
+                if enemy_distance < 54.0:
+                    shoot = False
 
         # === 6. ABS ТОРМОЗА И ФИНАЛЬНЫЙ ФИЛЬТР ЯМ ===
         if move.length() > 1e-6:
