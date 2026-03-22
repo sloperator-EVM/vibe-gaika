@@ -40,6 +40,9 @@ class SmartBot:
     pit_push_distance_glass: float = 108.0
     trace_enabled: bool = field(default_factory=lambda: os.getenv("GAICA_TRACE", "0") == "1")
     _last_trace_signature: tuple | None = None
+    recent_positions: list[Vec2] = field(default_factory=list)
+    stuck_window_ticks: int = 32
+    stuck_radius: float = 18.0
 
     def on_hello(self, message: HelloMessage) -> None:
         self.state.hello = message
@@ -56,6 +59,7 @@ class SmartBot:
         self.pits_cells.clear()
         self.map_initialized = False
         self._last_trace_signature = None
+        self.recent_positions.clear()
 
     def on_round_end(self, message: RoundEndMessage) -> None:
         self.state.last_round_end = message
@@ -283,57 +287,106 @@ class SmartBot:
     # =========================================================================
     def _smart_dodge(self, message: TickMessage, dodge_impassable: set) -> Vec2:
         me = message.you
-        threats = []
+        threats: list[tuple[object, Vec2, float, float, float]] = []
         
         for p in message.snapshot.projectiles:
             if p.owner_id == me.player_id: continue
             to_me = Vec2(me.position.x - p.position.x, me.position.y - p.position.y)
-            if to_me.length() > 250.0: continue 
+            if to_me.length() > 320.0: continue 
             
             p_dir = p.velocity.normalized()
             ahead = to_me.x * p_dir.x + to_me.y * p_dir.y
             lateral = abs(to_me.x * (-p_dir.y) + to_me.y * p_dir.x)
             
-            if -12.0 < ahead < 250.0 and lateral < 24.0:
-                threats.append((p, p_dir))
+            if -30.0 < ahead < 320.0 and lateral < 42.0:
+                speed = max(1.0, p.velocity.length())
+                tti = max(0.0, ahead) / speed
+                threats.append((p, p_dir, ahead, lateral, tti))
 
         if not threats: return Vec2()
 
-        best_move = Vec2()
+        best_move = Vec2(0.0, 0.0)
         best_score = -float('inf')
         
         candidates = [
+            Vec2(0,0),
             Vec2(1,0), Vec2(-1,0), Vec2(0,1), Vec2(0,-1),
             Vec2(0.707, 0.707), Vec2(-0.707, 0.707), Vec2(0.707, -0.707), Vec2(-0.707, -0.707)
         ]
 
         for cand in candidates:
-            test_x = me.position.x + cand.x * 24.0
-            test_y = me.position.y + cand.y * 24.0
-            cx, cy = int(test_x // self.cell_size), int(test_y // self.cell_size)
-            
-            if (cx, cy) in dodge_impassable or not self.is_safe_pos(test_x, test_y): 
-                continue 
-                
-            min_lateral = float('inf')
-            for p, p_dir in threats:
-                to_test = Vec2(test_x - p.position.x, test_y - p.position.y)
-                new_ahead = to_test.x * p_dir.x + to_test.y * p_dir.y
-                new_lateral = abs(to_test.x * (-p_dir.y) + to_test.y * p_dir.x)
-                if -12.0 < new_ahead < 250.0:
-                    if new_lateral < min_lateral: min_lateral = new_lateral
-            
-            if min_lateral > best_score:
-                best_score = min_lateral
+            # Проверяем позицию на нескольких горизонтах, а не только "следующий кадр".
+            score = 0.0
+            blocked = False
+            for horizon in (18.0, 32.0, 50.0):
+                test_x = me.position.x + cand.x * horizon
+                test_y = me.position.y + cand.y * horizon
+                cx, cy = int(test_x // self.cell_size), int(test_y // self.cell_size)
+
+                if (cx, cy) in dodge_impassable or not self.is_safe_pos(test_x, test_y):
+                    blocked = True
+                    break
+
+                min_lateral = float('inf')
+                min_tti = 99.0
+                for p, p_dir, _, _, _ in threats:
+                    to_test = Vec2(test_x - p.position.x, test_y - p.position.y)
+                    new_ahead = to_test.x * p_dir.x + to_test.y * p_dir.y
+                    new_lateral = abs(to_test.x * (-p_dir.y) + to_test.y * p_dir.x)
+                    if -30.0 < new_ahead < 320.0:
+                        min_lateral = min(min_lateral, new_lateral)
+                        speed = max(1.0, p.velocity.length())
+                        min_tti = min(min_tti, max(0.0, new_ahead) / speed)
+
+                if math.isinf(min_lateral):
+                    min_lateral = 99.0
+                score += min_lateral + min_tti * 120.0
+
+            if blocked:
+                continue
+
+            # Небольшой штраф стоять на месте при угрозе.
+            if cand.length() < 1e-6:
+                score -= 10.0
+
+            if score > best_score:
+                best_score = score
                 best_move = cand
                 
-        if best_score < 15.0 and threats:
-            p, p_dir = threats[0]
+        if best_score < 45.0 and threats:
+            p, p_dir, _, _, _ = threats[0]
             to_me = Vec2(me.position.x - p.position.x, me.position.y - p.position.y)
             handedness = -1.0 if (to_me.x * (-p_dir.y) + to_me.y * p_dir.x) > 0 else 1.0
             return Vec2(-p_dir.y * handedness, p_dir.x * handedness).normalized()
 
         return best_move
+
+    def _danger_from_bullets(self, message: TickMessage, pos: Vec2, horizon: float = 320.0) -> tuple[int, float]:
+        danger = 0
+        nearest_tti = 99.0
+        me = message.you
+        for p in message.snapshot.projectiles:
+            if p.owner_id == me.player_id:
+                continue
+            to_pos = Vec2(pos.x - p.position.x, pos.y - p.position.y)
+            if to_pos.length() > horizon:
+                continue
+            p_dir = p.velocity.normalized()
+            ahead = to_pos.x * p_dir.x + to_pos.y * p_dir.y
+            lateral = abs(to_pos.x * (-p_dir.y) + to_pos.y * p_dir.x)
+            if -24.0 < ahead < horizon and lateral < 26.0:
+                danger += 1
+                nearest_tti = min(nearest_tti, max(0.0, ahead) / max(1.0, p.velocity.length()))
+        return danger, nearest_tti
+
+    def _is_stuck(self) -> bool:
+        if len(self.recent_positions) < self.stuck_window_ticks:
+            return False
+        anchor = self.recent_positions[-1]
+        max_dist = 0.0
+        for point in self.recent_positions[-self.stuck_window_ticks:]:
+            max_dist = max(max_dist, anchor.distance_to(point))
+        return max_dist < self.stuck_radius
 
     # =========================================================================
     # ГЛАВНЫЙ ЦИКЛ ПРИНЯТИЯ РЕШЕНИЙ
@@ -347,6 +400,9 @@ class SmartBot:
 
         me, enemy = message.you, message.enemy
         if not me.alive: return BotCommand(seq=seq)
+        self.recent_positions.append(me.position)
+        if len(self.recent_positions) > 90:
+            self.recent_positions = self.recent_positions[-90:]
 
         # ВЫЧИСЛЕНИЕ СОБСТВЕННОЙ ИНЕРЦИИ
         my_vel = Vec2(0, 0)
@@ -371,6 +427,7 @@ class SmartBot:
         to_enemy = Vec2(enemy.position.x - me.position.x, enemy.position.y - me.position.y) if enemy.alive else Vec2()
         enemy_distance = to_enemy.length()
         enemy_dir = self._safe_direction(to_enemy, fallback=aim)
+        bullet_danger, nearest_tti = self._danger_from_bullets(message, me.position)
         
         has_weapon = False
         low_ammo = False
@@ -503,7 +560,7 @@ class SmartBot:
                         to_wp = Vec2(wp.x - me.position.x, wp.y - me.position.y)
                         move = self._safe_direction(to_wp, fallback=Vec2(0,0))
                     else:
-                        move = self._distance_control_move(enemy_dir, enemy_distance, preferred_distance, 0.9, seq)
+                        move = self._distance_control_move(enemy_dir, enemy_distance, preferred_distance, 0.75, seq)
                     
                     if nearby_pickup is not None and self._should_upgrade_weapon(weapon_type, my_ammo, nearby_pickup):
                         target_pos = getattr(nearby_pickup, 'position', None)
@@ -544,6 +601,34 @@ class SmartBot:
                                 aim = to_obs_dir
                                 pickup = False
                                 break
+
+            # === 5.1 АНТИ-ЗАСТРЕВАНИЕ: если стоим на месте слишком долго, активно ломаем путь ===
+            if self._is_stuck() and bullet_danger == 0 and nearest_tti > 0.35 and not kick and not shoot:
+                nearest_breakable = None
+                nearest_dist = float("inf")
+                for obs in message.snapshot.obstacles:
+                    if not getattr(obs, "solid", False):
+                        continue
+                    kind = getattr(obs, "kind", "").lower()
+                    if kind not in ("box", "glass", "letterbox"):
+                        continue
+                    dist = me.position.distance_to(obs.center)
+                    if dist < nearest_dist:
+                        nearest_dist = dist
+                        nearest_breakable = obs
+
+                if nearest_breakable is not None and nearest_dist < 55.0:
+                    to_obs = Vec2(nearest_breakable.center.x - me.position.x, nearest_breakable.center.y - me.position.y)
+                    aim = self._safe_direction(to_obs, fallback=aim)
+                    if has_weapon and me.shoot_cooldown <= 0.05:
+                        shoot = True
+                    elif me.kick_cooldown <= 0.05:
+                        kick = True
+                    move = aim
+                else:
+                    # Если рядом ломать нечего — агрессивно выходим из "залипания" в сторону врага.
+                    if enemy.alive:
+                        move = self._blend(enemy_dir, self._strafe(enemy_dir, 1.0), 0.3)
 
         # === 6. ABS ТОРМОЗА И ФИНАЛЬНЫЙ ФИЛЬТР ЯМ ===
         if move.length() > 1e-6:
