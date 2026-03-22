@@ -43,6 +43,9 @@ class SmartBot:
     recent_positions: list[Vec2] = field(default_factory=list)
     stuck_window_ticks: int = 32
     stuck_radius: float = 18.0
+    unstuck_active: bool = False
+    unstuck_dir: Vec2 = field(default_factory=Vec2)
+    unstuck_started_tick: int = -1
 
     def on_hello(self, message: HelloMessage) -> None:
         self.state.hello = message
@@ -60,6 +63,9 @@ class SmartBot:
         self.map_initialized = False
         self._last_trace_signature = None
         self.recent_positions.clear()
+        self.unstuck_active = False
+        self.unstuck_dir = Vec2(0.0, 0.0)
+        self.unstuck_started_tick = -1
 
     def on_round_end(self, message: RoundEndMessage) -> None:
         self.state.last_round_end = message
@@ -342,6 +348,11 @@ class SmartBot:
                     min_lateral = 99.0
                 score += min_lateral + min_tti * 120.0
 
+                # Доп. штраф у края карты: в уклонении выбираем более "глубокие" позиции.
+                edge_margin = min(test_x, self.map_w - test_x, test_y, self.map_h - test_y)
+                if edge_margin < 28.0:
+                    score -= (28.0 - edge_margin) * 3.0
+
             if blocked:
                 continue
 
@@ -387,6 +398,24 @@ class SmartBot:
         for point in self.recent_positions[-self.stuck_window_ticks:]:
             max_dist = max(max_dist, anchor.distance_to(point))
         return max_dist < self.stuck_radius
+
+    def _choose_safe_unstuck_dir(self, message: TickMessage, dodge_impassable: set, seq: int) -> Vec2:
+        me = message.you
+        candidates = [
+            Vec2(1, 0), Vec2(-1, 0), Vec2(0, 1), Vec2(0, -1),
+            Vec2(0.707, 0.707), Vec2(-0.707, 0.707), Vec2(0.707, -0.707), Vec2(-0.707, -0.707)
+        ]
+        start_idx = seq % len(candidates)
+        for offset in range(len(candidates)):
+            cand = candidates[(start_idx + offset) % len(candidates)]
+            tx = me.position.x + cand.x * 26.0
+            ty = me.position.y + cand.y * 26.0
+            cx, cy = int(tx // self.cell_size), int(ty // self.cell_size)
+            if (cx, cy) in dodge_impassable:
+                continue
+            if self.is_safe_pos(tx, ty):
+                return cand
+        return Vec2(0.0, 0.0)
 
     # =========================================================================
     # ГЛАВНЫЙ ЦИКЛ ПРИНЯТИЯ РЕШЕНИЙ
@@ -529,7 +558,13 @@ class SmartBot:
                                 move = self._blend(to_pickup_dir, combat_move, 0.4)
                             else: move = to_pickup_dir
                             
-                            if me.position.distance_to(target_pos) <= 22.0: pickup = True
+                            if me.position.distance_to(target_pos) <= 22.0:
+                                # Для ящика пополнения (letterbox) используем удар ногой.
+                                if isinstance(nearby_pickup, DummyPickup):
+                                    if me.kick_cooldown <= 0.05:
+                                        kick = True
+                                else:
+                                    pickup = True
                     elif enemy.alive and not has_weapon:
                         # В "сумо" без оружия играем заметно пассивнее.
                         desired = 82.0 if not enemy_armed else 72.0
@@ -604,6 +639,65 @@ class SmartBot:
 
             # === 5.1 АНТИ-ЗАСТРЕВАНИЕ: если стоим на месте слишком долго, активно ломаем путь ===
             if self._is_stuck() and bullet_danger == 0 and nearest_tti > 0.35 and not kick and not shoot:
+                if not self.unstuck_active:
+                    self.unstuck_active = True
+                    self.unstuck_started_tick = seq
+                    self.unstuck_dir = self._choose_safe_unstuck_dir(message, dodge_impassable, seq)
+
+            if self.unstuck_active and not kick and not shoot:
+                # Если основной алгоритм уже разморозил бота - сразу возвращаемся к нему.
+                if not self._is_stuck():
+                    self.unstuck_active = False
+                    self.unstuck_dir = Vec2(0.0, 0.0)
+                else:
+                    if self.unstuck_dir.length() < 1e-6:
+                        self.unstuck_dir = self._choose_safe_unstuck_dir(message, dodge_impassable, seq)
+                    if self.unstuck_dir.length() > 1e-6:
+                        tx = me.position.x + self.unstuck_dir.x * 24.0
+                        ty = me.position.y + self.unstuck_dir.y * 24.0
+                        if self.is_safe_pos(tx, ty):
+                            move = self.unstuck_dir
+                        else:
+                            self.unstuck_dir = self._choose_safe_unstuck_dir(message, dodge_impassable, seq + 3)
+
+                    # Если идти некуда — сначала стекло, потом коробки.
+                    if move.length() < 0.1:
+                        near_glass = None
+                        near_box = None
+                        best_glass_dist = float("inf")
+                        best_box_dist = float("inf")
+                        for obs in message.snapshot.obstacles:
+                            if not getattr(obs, "solid", False):
+                                continue
+                            kind = getattr(obs, "kind", "").lower()
+                            if kind not in ("glass", "box"):
+                                continue
+                            dist = me.position.distance_to(obs.center)
+                            if kind == "glass" and dist < best_glass_dist:
+                                best_glass_dist = dist
+                                near_glass = obs
+                            if kind == "box" and dist < best_box_dist:
+                                best_box_dist = dist
+                                near_box = obs
+
+                        target_obs = near_glass if near_glass is not None and best_glass_dist < 46.0 else None
+                        if target_obs is None and near_box is not None and best_box_dist < 46.0:
+                            target_obs = near_box
+                        if target_obs is not None:
+                            to_obs = Vec2(target_obs.center.x - me.position.x, target_obs.center.y - me.position.y)
+                            aim = self._safe_direction(to_obs, fallback=aim)
+                            if has_weapon and me.shoot_cooldown <= 0.05:
+                                shoot = True
+                            elif me.kick_cooldown <= 0.05:
+                                kick = True
+                            move = aim
+
+                    # Страховка: через время выбираем новое направление.
+                    if self.unstuck_started_tick >= 0 and (seq - self.unstuck_started_tick) > 45:
+                        self.unstuck_started_tick = seq
+                        self.unstuck_dir = self._choose_safe_unstuck_dir(message, dodge_impassable, seq + 5)
+
+            if self._is_stuck() and bullet_danger == 0 and nearest_tti > 0.35 and not kick and not shoot and not self.unstuck_active:
                 nearest_breakable = None
                 nearest_dist = float("inf")
                 for obs in message.snapshot.obstacles:
