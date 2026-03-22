@@ -46,6 +46,8 @@ class SmartBot:
     unstuck_active: bool = False
     unstuck_dir: Vec2 = field(default_factory=Vec2)
     unstuck_started_tick: int = -1
+    resupply_focus_ticks: int = 0
+    resupply_focus_pos: Vec2 | None = None
 
     def on_hello(self, message: HelloMessage) -> None:
         self.state.hello = message
@@ -66,6 +68,8 @@ class SmartBot:
         self.unstuck_active = False
         self.unstuck_dir = Vec2(0.0, 0.0)
         self.unstuck_started_tick = -1
+        self.resupply_focus_ticks = 0
+        self.resupply_focus_pos = None
 
     def on_round_end(self, message: RoundEndMessage) -> None:
         self.state.last_round_end = message
@@ -490,6 +494,7 @@ class SmartBot:
         else:
             nearby_pickup = self._best_pickup(message)
             clear_shot = enemy.alive and self._has_clear_shot(message, me.position, predict_target)
+            enemy_clear_shot = enemy.alive and enemy_armed and self._has_clear_shot(message, enemy.position, me.position)
             if enemy.alive: aim = predict_dir
 
             # === 2. РУКОПАШНАЯ ===
@@ -562,6 +567,8 @@ class SmartBot:
                                 # Для ящика пополнения (letterbox) используем удар ногой.
                                 if isinstance(nearby_pickup, DummyPickup):
                                     if me.kick_cooldown <= 0.05:
+                                        self.resupply_focus_ticks = 2
+                                        self.resupply_focus_pos = Vec2(target_pos.x, target_pos.y)
                                         kick = True
                                 else:
                                     pickup = True
@@ -580,15 +587,15 @@ class SmartBot:
                             move = Vec2(st.x * 0.2, st.y * 0.2)
 
                 if has_weapon and move.length() < 0.1: 
-                    preferred_distance = 90.0
+                    preferred_distance = 110.0
                     if "uzi" in weapon_type:
                         if "revolver" in enemy_w_type and getattr(enemy, 'shoot_cooldown', 0.0) > 0.1:
-                            preferred_distance = 25.0
+                            preferred_distance = 75.0
                         else:
-                            preferred_distance = 60.0 if not low_ammo else 45.0
+                            preferred_distance = 85.0 if not low_ammo else 70.0
                     elif "revolver" in weapon_type:
-                        if "uzi" in enemy_w_type: preferred_distance = 220.0
-                        else: preferred_distance = 150.0
+                        if "uzi" in enemy_w_type: preferred_distance = 235.0
+                        else: preferred_distance = 170.0
 
                     if not clear_shot and enemy.alive and enemy_distance > 100.0:
                         wp = self._find_path_info(me.position, enemy.position, impassable.copy(), costs)
@@ -596,6 +603,11 @@ class SmartBot:
                         move = self._safe_direction(to_wp, fallback=Vec2(0,0))
                     else:
                         move = self._distance_control_move(enemy_dir, enemy_distance, preferred_distance, 0.75, seq)
+
+                    # Не подходим слишком близко к вооруженному противнику — оставляем себе пространство для dodge.
+                    if enemy.alive and enemy_armed and enemy_distance < 58.0:
+                        retreat = Vec2(-enemy_dir.x, -enemy_dir.y)
+                        move = self._blend(retreat, self._strafe(enemy_dir, 1.0 if seq % 2 else -1.0), 0.35)
                     
                     if nearby_pickup is not None and self._should_upgrade_weapon(weapon_type, my_ammo, nearby_pickup):
                         target_pos = getattr(nearby_pickup, 'position', None)
@@ -724,6 +736,17 @@ class SmartBot:
                     if enemy.alive:
                         move = self._blend(enemy_dir, self._strafe(enemy_dir, 1.0), 0.3)
 
+            # Превентивный dodge: если противник вооружен, целится и есть прямая линия - уклоняемся заранее.
+            if enemy.alive and enemy_clear_shot and enemy_distance < 280.0 and not kick:
+                enemy_face = self._safe_direction(enemy.facing, fallback=Vec2(-enemy_dir.x, -enemy_dir.y))
+                to_me = Vec2(me.position.x - enemy.position.x, me.position.y - enemy.position.y).normalized()
+                aim_dot = enemy_face.x * to_me.x + enemy_face.y * to_me.y
+                if aim_dot > 0.86:
+                    pre_dodge = self._strafe(enemy_dir, 1.0 if seq % 2 else -1.0)
+                    move = self._blend(move if move.length() > 0.1 else pre_dodge, pre_dodge, 0.6)
+                    if enemy_distance < 75.0:
+                        shoot = False
+
         # === 6. ABS ТОРМОЗА И ФИНАЛЬНЫЙ ФИЛЬТР ЯМ ===
         if move.length() > 1e-6:
             if move.length() > 1.0: move = move.normalized()
@@ -747,6 +770,14 @@ class SmartBot:
                         move = Vec2(0.0, 0.0)
         else:
             move = Vec2(0.0, 0.0)
+
+        if self.resupply_focus_ticks > 0 and self.resupply_focus_pos is not None:
+            to_resupply = Vec2(self.resupply_focus_pos.x - me.position.x, self.resupply_focus_pos.y - me.position.y)
+            if to_resupply.length() > 1e-6:
+                aim = to_resupply.normalized()
+            self.resupply_focus_ticks -= 1
+        else:
+            self.resupply_focus_pos = None
 
         if aim.length() < 1e-6: aim = Vec2(1.0, 0.0)
         if kick: shoot = False
