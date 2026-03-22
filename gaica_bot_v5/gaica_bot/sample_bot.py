@@ -35,6 +35,8 @@ class SmartBot:
     map_w: float = 1280.0
     map_h: float = 720.0
     map_initialized: bool = False
+    pit_push_distance: float = 132.0
+    pit_push_distance_glass: float = 108.0
 
     def on_hello(self, message: HelloMessage) -> None:
         self.state.hello = message
@@ -146,13 +148,23 @@ class SmartBot:
         ]
         for cand in candidates:
             start_mock = Vec2(enemy_pos.x - cand.x * 10, enemy_pos.y - cand.y * 10)
-            if self._check_pit_trajectory(start_mock, enemy_pos, 175.0, impassable):
+            if self._check_pit_trajectory(start_mock, enemy_pos, self.pit_push_distance, impassable):
                 ideal_x = enemy_pos.x - cand.x * 26.0
                 ideal_y = enemy_pos.y - cand.y * 26.0
                 ix, iy = int(ideal_x // self.cell_size), int(ideal_y // self.cell_size)
                 if (ix, iy) not in impassable and self.is_safe_pos(ideal_x, ideal_y):
                     return Vec2(ideal_x, ideal_y)
         return None
+
+    def _has_glass_on_line(self, message: TickMessage, start: Vec2, end: Vec2) -> bool:
+        for obstacle in message.snapshot.obstacles:
+            if not getattr(obstacle, "solid", False):
+                continue
+            if getattr(obstacle, "kind", "").lower() != "glass":
+                continue
+            if self._segment_intersects_rect(start, end, obstacle):
+                return True
+        return False
 
     # =========================================================================
     # A* PATHFINDING (Защита от заталкивания в яму)
@@ -391,8 +403,11 @@ class SmartBot:
             if enemy.alive: aim = predict_dir
 
             # === 2. РУКОПАШНАЯ ===
-            we_can_pit = self._check_pit_trajectory(me.position, enemy.position, 175.0, impassable)
-            they_can_pit = self._check_pit_trajectory(enemy.position, me.position, 175.0, impassable)
+            pit_dist = self.pit_push_distance
+            if self._has_glass_on_line(message, me.position, enemy.position):
+                pit_dist = self.pit_push_distance_glass
+            we_can_pit = self._check_pit_trajectory(me.position, enemy.position, pit_dist, impassable)
+            they_can_pit = self._check_pit_trajectory(enemy.position, me.position, pit_dist, impassable)
             ideal_kick_pos = self._find_ideal_kick_pos(enemy.position, impassable)
             
             melee_override = False
@@ -405,7 +420,7 @@ class SmartBot:
                     melee_override = True
                     
                 # Бьем, только если подошли вплотную
-                elif we_can_pit and enemy_distance <= 30.0:
+                elif we_can_pit and enemy_distance <= 26.0:
                     if me.kick_cooldown <= 0.05: kick = True
                     move = enemy_dir
                     melee_override = True
@@ -429,6 +444,16 @@ class SmartBot:
                     move = enemy_dir
                     melee_override = True
 
+            # Если враг буквально "внутри" нас и пытается выстрелить - сразу отталкиваем.
+            if enemy.alive and enemy_armed and enemy_distance <= 20.0:
+                enemy_facing = self._safe_direction(enemy.facing, fallback=enemy_dir)
+                facing_dot = enemy_facing.x * (-enemy_dir.x) + enemy_facing.y * (-enemy_dir.y)
+                if facing_dot > 0.55:
+                    if me.kick_cooldown <= 0.05:
+                        kick = True
+                    move = self._blend(Vec2(-enemy_dir.x, -enemy_dir.y), self._strafe(enemy_dir, 1.0), 0.45)
+                    melee_override = True
+
             # === 3. НАВИГАЦИЯ И ПАТРОНЫ ===
             if not melee_override:
                 if not has_weapon or low_ammo:
@@ -445,7 +470,8 @@ class SmartBot:
                             
                             if me.position.distance_to(target_pos) <= 22.0: pickup = True
                     elif enemy.alive and not has_weapon:
-                        desired = 68.0 if enemy_armed else 28.0
+                        # В "сумо" без оружия играем заметно пассивнее.
+                        desired = 82.0 if not enemy_armed else 72.0
                         
                         wp = self._find_path_info(me.position, enemy.position, impassable.copy(), costs)
                         to_wp = Vec2(wp.x - me.position.x, wp.y - me.position.y)
@@ -494,7 +520,7 @@ class SmartBot:
                     flank = self._strafe(enemy_dir, handedness=-1.0 if seq % 2 else 1.0)
                     move = self._blend(move, flank, 0.45)
 
-                if me.weapon is not None and me.weapon.ammo <= 0: drop = True
+                # Не дропаем оружие автоматически, чтобы не ловить цикл "подобрал -> выкинул".
                 if enemy_distance <= 18.0 and enemy_armed and me.weapon is not None and me.weapon.ammo == 1:
                     throw_item = True
                     shoot = False
