@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import heapq
 import math
+import os
 import sys
 from dataclasses import dataclass, field
 
@@ -37,6 +38,8 @@ class SmartBot:
     map_initialized: bool = False
     pit_push_distance: float = 132.0
     pit_push_distance_glass: float = 108.0
+    trace_enabled: bool = field(default_factory=lambda: os.getenv("GAICA_TRACE", "0") == "1")
+    _last_trace_signature: tuple | None = None
 
     def on_hello(self, message: HelloMessage) -> None:
         self.state.hello = message
@@ -52,6 +55,7 @@ class SmartBot:
         self.floor_rects.clear()
         self.pits_cells.clear()
         self.map_initialized = False
+        self._last_trace_signature = None
 
     def on_round_end(self, message: RoundEndMessage) -> None:
         self.state.last_round_end = message
@@ -526,7 +530,8 @@ class SmartBot:
                     shoot = False
 
             # === 5. ВАНДАЛИЗМ ===
-            if move.length() > 0.1 and not kick and not shoot and not pickup:
+            should_vandalize = has_weapon and ((not enemy.alive) or (enemy_distance > 90.0 and not enemy_armed))
+            if should_vandalize and move.length() > 0.1 and not kick and not shoot and not pickup:
                 move_dir = move.normalized()
                 for obs in message.snapshot.obstacles:
                     if getattr(obs, 'solid', False) and getattr(obs, 'kind', '').lower() in ("box", "glass", "letterbox"):
@@ -568,7 +573,43 @@ class SmartBot:
         if kick: shoot = False
         if pickup or drop or throw_item: kick = False
 
-        return BotCommand(seq=seq, move=move, aim=aim, shoot=shoot, kick=kick, pickup=pickup, drop=drop, throw_item=throw_item)
+        command = BotCommand(
+            seq=seq,
+            move=move,
+            aim=aim,
+            shoot=shoot,
+            kick=kick,
+            pickup=pickup,
+            drop=drop,
+            throw_item=throw_item,
+        )
+        self._trace_decision(message=message, command=command, has_weapon=has_weapon, enemy_distance=enemy_distance)
+        return command
+
+    def _trace_decision(self, message: TickMessage, command: BotCommand, has_weapon: bool, enemy_distance: float) -> None:
+        if not self.trace_enabled:
+            return
+        tick = int(getattr(message, "tick", 0))
+        action_sig = (
+            round(command.move.x, 1),
+            round(command.move.y, 1),
+            bool(command.shoot),
+            bool(command.kick),
+            bool(command.pickup),
+            bool(command.throw_item),
+            bool(has_weapon),
+            int(enemy_distance // 10),
+        )
+        if self._last_trace_signature == action_sig and tick % 20 != 0:
+            return
+        self._last_trace_signature = action_sig
+        print(
+            f"[trace] tick={tick} dist={enemy_distance:.1f} "
+            f"move=({command.move.x:.2f},{command.move.y:.2f}) "
+            f"shoot={int(command.shoot)} kick={int(command.kick)} "
+            f"pickup={int(command.pickup)} throw={int(command.throw_item)}",
+            file=sys.stderr,
+        )
 
     # --- Вспомогательные методы ---
     def _safe_direction(self, vector: Vec2, fallback: Vec2) -> Vec2:
