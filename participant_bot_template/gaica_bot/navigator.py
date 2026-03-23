@@ -218,9 +218,13 @@ class Navigator:
         obstacles: list[ObstacleView],
         *,
         ignore_breakables: bool = False,
+        ignored_kinds: set[str] | None = None,
     ) -> bool:
+        ignored = ignored_kinds or set()
         for obstacle in obstacles:
             if not obstacle.solid or obstacle.kind not in SOLID_KINDS:
+                continue
+            if obstacle.kind in ignored:
                 continue
             if ignore_breakables and obstacle.kind in BREAKABLE_KINDS:
                 continue
@@ -228,11 +232,19 @@ class Navigator:
                 return False
         return True
 
-    def first_blocker(self, start: Vec2, target: Vec2, obstacles: list[ObstacleView]) -> ObstacleView | None:
+    def first_blocker(
+        self,
+        start: Vec2,
+        target: Vec2,
+        obstacles: list[ObstacleView],
+        *,
+        ignored_kinds: set[str] | None = None,
+    ) -> ObstacleView | None:
+        ignored = ignored_kinds or set()
         best = None
         best_dist = float("inf")
         for obstacle in obstacles:
-            if not obstacle.solid or obstacle.kind not in SOLID_KINDS:
+            if not obstacle.solid or obstacle.kind not in SOLID_KINDS or obstacle.kind in ignored:
                 continue
             if not self.segment_hits_obstacle(start, target, obstacle, 0.0):
                 continue
