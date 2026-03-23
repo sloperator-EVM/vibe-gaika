@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import heapq
 import math
-import os
 import sys
 from dataclasses import dataclass, field
 
@@ -36,18 +35,6 @@ class SmartBot:
     map_w: float = 1280.0
     map_h: float = 720.0
     map_initialized: bool = False
-    pit_push_distance: float = 132.0
-    pit_push_distance_glass: float = 108.0
-    trace_enabled: bool = field(default_factory=lambda: os.getenv("GAICA_TRACE", "0") == "1")
-    _last_trace_signature: tuple | None = None
-    recent_positions: list[Vec2] = field(default_factory=list)
-    stuck_window_ticks: int = 32
-    stuck_radius: float = 18.0
-    unstuck_active: bool = False
-    unstuck_dir: Vec2 = field(default_factory=Vec2)
-    unstuck_started_tick: int = -1
-    resupply_focus_ticks: int = 0
-    resupply_focus_pos: Vec2 | None = None
 
     def on_hello(self, message: HelloMessage) -> None:
         self.state.hello = message
@@ -63,13 +50,6 @@ class SmartBot:
         self.floor_rects.clear()
         self.pits_cells.clear()
         self.map_initialized = False
-        self._last_trace_signature = None
-        self.recent_positions.clear()
-        self.unstuck_active = False
-        self.unstuck_dir = Vec2(0.0, 0.0)
-        self.unstuck_started_tick = -1
-        self.resupply_focus_ticks = 0
-        self.resupply_focus_pos = None
 
     def on_round_end(self, message: RoundEndMessage) -> None:
         self.state.last_round_end = message
@@ -166,23 +146,13 @@ class SmartBot:
         ]
         for cand in candidates:
             start_mock = Vec2(enemy_pos.x - cand.x * 10, enemy_pos.y - cand.y * 10)
-            if self._check_pit_trajectory(start_mock, enemy_pos, self.pit_push_distance, impassable):
+            if self._check_pit_trajectory(start_mock, enemy_pos, 175.0, impassable):
                 ideal_x = enemy_pos.x - cand.x * 26.0
                 ideal_y = enemy_pos.y - cand.y * 26.0
                 ix, iy = int(ideal_x // self.cell_size), int(ideal_y // self.cell_size)
                 if (ix, iy) not in impassable and self.is_safe_pos(ideal_x, ideal_y):
                     return Vec2(ideal_x, ideal_y)
         return None
-
-    def _has_glass_on_line(self, message: TickMessage, start: Vec2, end: Vec2) -> bool:
-        for obstacle in message.snapshot.obstacles:
-            if not getattr(obstacle, "solid", False):
-                continue
-            if getattr(obstacle, "kind", "").lower() != "glass":
-                continue
-            if self._segment_intersects_rect(start, end, obstacle):
-                return True
-        return False
 
     # =========================================================================
     # A* PATHFINDING (Защита от заталкивания в яму)
@@ -297,153 +267,57 @@ class SmartBot:
     # =========================================================================
     def _smart_dodge(self, message: TickMessage, dodge_impassable: set) -> Vec2:
         me = message.you
-        threats: list[tuple[object, Vec2, float, float, float]] = []
+        threats = []
         
         for p in message.snapshot.projectiles:
             if p.owner_id == me.player_id: continue
             to_me = Vec2(me.position.x - p.position.x, me.position.y - p.position.y)
-            if to_me.length() > 320.0: continue 
+            if to_me.length() > 250.0: continue 
             
             p_dir = p.velocity.normalized()
             ahead = to_me.x * p_dir.x + to_me.y * p_dir.y
             lateral = abs(to_me.x * (-p_dir.y) + to_me.y * p_dir.x)
             
-            if -30.0 < ahead < 320.0 and lateral < 42.0:
-                speed = max(1.0, p.velocity.length())
-                tti = max(0.0, ahead) / speed
-                threats.append((p, p_dir, ahead, lateral, tti))
+            if -12.0 < ahead < 250.0 and lateral < 24.0:
+                threats.append((p, p_dir))
 
-        enemy = message.enemy
-        enemy_w = getattr(enemy, "weapon", None)
-        enemy_armed = bool(
-            enemy.alive
-            and enemy_w is not None
-            and getattr(enemy_w, "weapon_type", "none").lower() != "none"
-            and getattr(enemy_w, "ammo", 0) > 0
-        )
-        # Превентивная угроза по прицелу врага: помогает уклоняться до появления пули.
-        if enemy_armed and enemy.position.distance_to(me.position) < 360.0:
-            enemy_face = self._safe_direction(
-                enemy.facing,
-                fallback=Vec2(me.position.x - enemy.position.x, me.position.y - enemy.position.y),
-            )
-            to_me = Vec2(me.position.x - enemy.position.x, me.position.y - enemy.position.y)
-            ahead = to_me.x * enemy_face.x + to_me.y * enemy_face.y
-            lateral = abs(to_me.x * (-enemy_face.y) + to_me.y * enemy_face.x)
-            if 0.0 < ahead < 360.0 and lateral < 34.0 and self._has_clear_shot(message, enemy.position, me.position):
-                synthetic = type("AimThreat", (), {"position": enemy.position, "velocity": Vec2(enemy_face.x * 620.0, enemy_face.y * 620.0)})
-                threats.append((synthetic, enemy_face, ahead, lateral, ahead / 620.0))
+        if not threats: return Vec2()
 
-        if not threats:
-            return Vec2()
-
-        best_move = Vec2(0.0, 0.0)
+        best_move = Vec2()
         best_score = -float('inf')
         
         candidates = [
             Vec2(1,0), Vec2(-1,0), Vec2(0,1), Vec2(0,-1),
-            Vec2(0.707, 0.707), Vec2(-0.707, 0.707), Vec2(0.707, -0.707), Vec2(-0.707, -0.707),
-            Vec2(0.924, 0.383), Vec2(-0.924, 0.383), Vec2(0.924, -0.383), Vec2(-0.924, -0.383),
-            Vec2(0.383, 0.924), Vec2(-0.383, 0.924), Vec2(0.383, -0.924), Vec2(-0.383, -0.924),
-            Vec2(0, 0),
+            Vec2(0.707, 0.707), Vec2(-0.707, 0.707), Vec2(0.707, -0.707), Vec2(-0.707, -0.707)
         ]
 
         for cand in candidates:
-            # Проверяем позицию на нескольких горизонтах, а не только "следующий кадр".
-            score = 0.0
-            blocked = False
-            for horizon in (14.0, 26.0, 40.0, 58.0):
-                test_x = me.position.x + cand.x * horizon
-                test_y = me.position.y + cand.y * horizon
-                cx, cy = int(test_x // self.cell_size), int(test_y // self.cell_size)
-
-                if (cx, cy) in dodge_impassable or not self.is_safe_pos(test_x, test_y):
-                    blocked = True
-                    break
-
-                min_lateral = float('inf')
-                min_tti = 99.0
-                for p, p_dir, _, _, _ in threats:
-                    to_test = Vec2(test_x - p.position.x, test_y - p.position.y)
-                    new_ahead = to_test.x * p_dir.x + to_test.y * p_dir.y
-                    new_lateral = abs(to_test.x * (-p_dir.y) + to_test.y * p_dir.x)
-                    if -30.0 < new_ahead < 320.0:
-                        min_lateral = min(min_lateral, new_lateral)
-                        speed = max(1.0, p.velocity.length())
-                        min_tti = min(min_tti, max(0.0, new_ahead) / speed)
-
-                if math.isinf(min_lateral):
-                    min_lateral = 99.0
-                score += min_lateral * 1.3 + min_tti * 140.0
-
-                # Доп. штраф у края карты: в уклонении выбираем более "глубокие" позиции.
-                edge_margin = min(test_x, self.map_w - test_x, test_y, self.map_h - test_y)
-                if edge_margin < 42.0:
-                    score -= (42.0 - edge_margin) * 5.5
-
-            if blocked:
-                continue
-
-            # Небольшой штраф стоять на месте при угрозе.
-            if cand.length() < 1e-6:
-                score -= 30.0
-
-            if score > best_score:
-                best_score = score
+            test_x = me.position.x + cand.x * 24.0
+            test_y = me.position.y + cand.y * 24.0
+            cx, cy = int(test_x // self.cell_size), int(test_y // self.cell_size)
+            
+            if (cx, cy) in dodge_impassable or not self.is_safe_pos(test_x, test_y): 
+                continue 
+                
+            min_lateral = float('inf')
+            for p, p_dir in threats:
+                to_test = Vec2(test_x - p.position.x, test_y - p.position.y)
+                new_ahead = to_test.x * p_dir.x + to_test.y * p_dir.y
+                new_lateral = abs(to_test.x * (-p_dir.y) + to_test.y * p_dir.x)
+                if -12.0 < new_ahead < 250.0:
+                    if new_lateral < min_lateral: min_lateral = new_lateral
+            
+            if min_lateral > best_score:
+                best_score = min_lateral
                 best_move = cand
                 
-        if best_score < 45.0 and threats:
-            p, p_dir, _, _, _ = threats[0]
+        if best_score < 15.0 and threats:
+            p, p_dir = threats[0]
             to_me = Vec2(me.position.x - p.position.x, me.position.y - p.position.y)
             handedness = -1.0 if (to_me.x * (-p_dir.y) + to_me.y * p_dir.x) > 0 else 1.0
             return Vec2(-p_dir.y * handedness, p_dir.x * handedness).normalized()
 
-        return best_move.normalized() if best_move.length() > 1e-6 else Vec2()
-
-    def _danger_from_bullets(self, message: TickMessage, pos: Vec2, horizon: float = 320.0) -> tuple[int, float]:
-        danger = 0
-        nearest_tti = 99.0
-        me = message.you
-        for p in message.snapshot.projectiles:
-            if p.owner_id == me.player_id:
-                continue
-            to_pos = Vec2(pos.x - p.position.x, pos.y - p.position.y)
-            if to_pos.length() > horizon:
-                continue
-            p_dir = p.velocity.normalized()
-            ahead = to_pos.x * p_dir.x + to_pos.y * p_dir.y
-            lateral = abs(to_pos.x * (-p_dir.y) + to_pos.y * p_dir.x)
-            if -24.0 < ahead < horizon and lateral < 26.0:
-                danger += 1
-                nearest_tti = min(nearest_tti, max(0.0, ahead) / max(1.0, p.velocity.length()))
-        return danger, nearest_tti
-
-    def _is_stuck(self) -> bool:
-        if len(self.recent_positions) < self.stuck_window_ticks:
-            return False
-        anchor = self.recent_positions[-1]
-        max_dist = 0.0
-        for point in self.recent_positions[-self.stuck_window_ticks:]:
-            max_dist = max(max_dist, anchor.distance_to(point))
-        return max_dist < self.stuck_radius
-
-    def _choose_safe_unstuck_dir(self, message: TickMessage, dodge_impassable: set, seq: int) -> Vec2:
-        me = message.you
-        candidates = [
-            Vec2(1, 0), Vec2(-1, 0), Vec2(0, 1), Vec2(0, -1),
-            Vec2(0.707, 0.707), Vec2(-0.707, 0.707), Vec2(0.707, -0.707), Vec2(-0.707, -0.707)
-        ]
-        start_idx = seq % len(candidates)
-        for offset in range(len(candidates)):
-            cand = candidates[(start_idx + offset) % len(candidates)]
-            tx = me.position.x + cand.x * 26.0
-            ty = me.position.y + cand.y * 26.0
-            cx, cy = int(tx // self.cell_size), int(ty // self.cell_size)
-            if (cx, cy) in dodge_impassable:
-                continue
-            if self.is_safe_pos(tx, ty):
-                return cand
-        return Vec2(0.0, 0.0)
+        return best_move
 
     # =========================================================================
     # ГЛАВНЫЙ ЦИКЛ ПРИНЯТИЯ РЕШЕНИЙ
@@ -457,9 +331,6 @@ class SmartBot:
 
         me, enemy = message.you, message.enemy
         if not me.alive: return BotCommand(seq=seq)
-        self.recent_positions.append(me.position)
-        if len(self.recent_positions) > 90:
-            self.recent_positions = self.recent_positions[-90:]
 
         # ВЫЧИСЛЕНИЕ СОБСТВЕННОЙ ИНЕРЦИИ
         my_vel = Vec2(0, 0)
@@ -484,7 +355,6 @@ class SmartBot:
         to_enemy = Vec2(enemy.position.x - me.position.x, enemy.position.y - me.position.y) if enemy.alive else Vec2()
         enemy_distance = to_enemy.length()
         enemy_dir = self._safe_direction(to_enemy, fallback=aim)
-        bullet_danger, nearest_tti = self._danger_from_bullets(message, me.position)
         
         has_weapon = False
         low_ammo = False
@@ -518,15 +388,11 @@ class SmartBot:
         else:
             nearby_pickup = self._best_pickup(message)
             clear_shot = enemy.alive and self._has_clear_shot(message, me.position, predict_target)
-            enemy_clear_shot = enemy.alive and enemy_armed and self._has_clear_shot(message, enemy.position, me.position)
             if enemy.alive: aim = predict_dir
 
             # === 2. РУКОПАШНАЯ ===
-            pit_dist = self.pit_push_distance
-            if self._has_glass_on_line(message, me.position, enemy.position):
-                pit_dist = self.pit_push_distance_glass
-            we_can_pit = self._check_pit_trajectory(me.position, enemy.position, pit_dist, impassable)
-            they_can_pit = self._check_pit_trajectory(enemy.position, me.position, pit_dist, impassable)
+            we_can_pit = self._check_pit_trajectory(me.position, enemy.position, 175.0, impassable)
+            they_can_pit = self._check_pit_trajectory(enemy.position, me.position, 175.0, impassable)
             ideal_kick_pos = self._find_ideal_kick_pos(enemy.position, impassable)
             
             melee_override = False
@@ -539,7 +405,7 @@ class SmartBot:
                     melee_override = True
                     
                 # Бьем, только если подошли вплотную
-                elif we_can_pit and enemy_distance <= 26.0:
+                elif we_can_pit and enemy_distance <= 30.0:
                     if me.kick_cooldown <= 0.05: kick = True
                     move = enemy_dir
                     melee_override = True
@@ -563,16 +429,6 @@ class SmartBot:
                     move = enemy_dir
                     melee_override = True
 
-            # Если враг буквально "внутри" нас и пытается выстрелить - сразу отталкиваем.
-            if enemy.alive and enemy_armed and enemy_distance <= 20.0:
-                enemy_facing = self._safe_direction(enemy.facing, fallback=enemy_dir)
-                facing_dot = enemy_facing.x * (-enemy_dir.x) + enemy_facing.y * (-enemy_dir.y)
-                if facing_dot > 0.55:
-                    if me.kick_cooldown <= 0.05:
-                        kick = True
-                    move = self._blend(Vec2(-enemy_dir.x, -enemy_dir.y), self._strafe(enemy_dir, 1.0), 0.45)
-                    melee_override = True
-
             # === 3. НАВИГАЦИЯ И ПАТРОНЫ ===
             if not melee_override:
                 if not has_weapon or low_ammo:
@@ -582,34 +438,14 @@ class SmartBot:
                             wp = self._find_path_info(me.position, target_pos, impassable.copy(), costs)
                             to_pickup_dir = Vec2(wp.x - me.position.x, wp.y - me.position.y).normalized()
                             
-                            if has_weapon and enemy.alive and not isinstance(nearby_pickup, DummyPickup):
-                                combat_move = self._distance_control_move(enemy_dir, enemy_distance, 105.0, 0.75, seq)
-                                move = self._blend(to_pickup_dir, combat_move, 0.35)
-                            else:
-                                move = to_pickup_dir
+                            if has_weapon and enemy.alive:
+                                combat_move = self._distance_control_move(enemy_dir, enemy_distance, 90.0, 0.7, seq)
+                                move = self._blend(to_pickup_dir, combat_move, 0.4)
+                            else: move = to_pickup_dir
                             
-                            if isinstance(nearby_pickup, DummyPickup) and me.position.distance_to(target_pos) <= 36.0:
-                                to_box = Vec2(target_pos.x - me.position.x, target_pos.y - me.position.y)
-                                if to_box.length() > 1e-6:
-                                    aim = to_box.normalized()
-                                move = Vec2(0.0, 0.0)
-                                if me.kick_cooldown <= 0.05:
-                                    self.resupply_focus_ticks = 3
-                                    self.resupply_focus_pos = Vec2(target_pos.x, target_pos.y)
-                                    kick = True
-                                    pickup = False
-                            elif me.position.distance_to(target_pos) <= 22.0:
-                                # Для ящика пополнения (letterbox) используем удар ногой.
-                                if isinstance(nearby_pickup, DummyPickup):
-                                    if me.kick_cooldown <= 0.05:
-                                        self.resupply_focus_ticks = 3
-                                        self.resupply_focus_pos = Vec2(target_pos.x, target_pos.y)
-                                        kick = True
-                                else:
-                                    pickup = True
+                            if me.position.distance_to(target_pos) <= 22.0: pickup = True
                     elif enemy.alive and not has_weapon:
-                        # В "сумо" без оружия играем заметно пассивнее.
-                        desired = 82.0 if not enemy_armed else 72.0
+                        desired = 68.0 if enemy_armed else 28.0
                         
                         wp = self._find_path_info(me.position, enemy.position, impassable.copy(), costs)
                         to_wp = Vec2(wp.x - me.position.x, wp.y - me.position.y)
@@ -622,27 +458,22 @@ class SmartBot:
                             move = Vec2(st.x * 0.2, st.y * 0.2)
 
                 if has_weapon and move.length() < 0.1: 
-                    preferred_distance = 122.0
+                    preferred_distance = 90.0
                     if "uzi" in weapon_type:
                         if "revolver" in enemy_w_type and getattr(enemy, 'shoot_cooldown', 0.0) > 0.1:
-                            preferred_distance = 75.0
+                            preferred_distance = 25.0
                         else:
-                            preferred_distance = 85.0 if not low_ammo else 70.0
+                            preferred_distance = 60.0 if not low_ammo else 45.0
                     elif "revolver" in weapon_type:
-                        if "uzi" in enemy_w_type: preferred_distance = 235.0
-                        else: preferred_distance = 170.0
+                        if "uzi" in enemy_w_type: preferred_distance = 220.0
+                        else: preferred_distance = 150.0
 
                     if not clear_shot and enemy.alive and enemy_distance > 100.0:
                         wp = self._find_path_info(me.position, enemy.position, impassable.copy(), costs)
                         to_wp = Vec2(wp.x - me.position.x, wp.y - me.position.y)
                         move = self._safe_direction(to_wp, fallback=Vec2(0,0))
                     else:
-                        move = self._distance_control_move(enemy_dir, enemy_distance, preferred_distance, 0.75, seq)
-
-                    # Не подходим слишком близко к вооруженному противнику — оставляем себе пространство для dodge.
-                    if enemy.alive and enemy_armed and enemy_distance < 72.0:
-                        retreat = Vec2(-enemy_dir.x, -enemy_dir.y)
-                        move = self._blend(retreat, self._strafe(enemy_dir, 1.0 if seq % 2 else -1.0), 0.28)
+                        move = self._distance_control_move(enemy_dir, enemy_distance, preferred_distance, 0.9, seq)
                     
                     if nearby_pickup is not None and self._should_upgrade_weapon(weapon_type, my_ammo, nearby_pickup):
                         target_pos = getattr(nearby_pickup, 'position', None)
@@ -663,14 +494,13 @@ class SmartBot:
                     flank = self._strafe(enemy_dir, handedness=-1.0 if seq % 2 else 1.0)
                     move = self._blend(move, flank, 0.45)
 
-                # Не дропаем оружие автоматически, чтобы не ловить цикл "подобрал -> выкинул".
+                if me.weapon is not None and me.weapon.ammo <= 0: drop = True
                 if enemy_distance <= 18.0 and enemy_armed and me.weapon is not None and me.weapon.ammo == 1:
                     throw_item = True
                     shoot = False
 
             # === 5. ВАНДАЛИЗМ ===
-            should_vandalize = has_weapon and ((not enemy.alive) or (enemy_distance > 90.0 and not enemy_armed))
-            if should_vandalize and move.length() > 0.1 and not kick and not shoot and not pickup:
+            if move.length() > 0.1 and not kick and not shoot and not pickup:
                 move_dir = move.normalized()
                 for obs in message.snapshot.obstacles:
                     if getattr(obs, 'solid', False) and getattr(obs, 'kind', '').lower() in ("box", "glass", "letterbox"):
@@ -683,112 +513,6 @@ class SmartBot:
                                 aim = to_obs_dir
                                 pickup = False
                                 break
-
-            # === 5.1 АНТИ-ЗАСТРЕВАНИЕ: если стоим на месте слишком долго, активно ломаем путь ===
-            if self._is_stuck() and bullet_danger == 0 and nearest_tti > 0.35 and not kick and not shoot:
-                if not self.unstuck_active:
-                    self.unstuck_active = True
-                    self.unstuck_started_tick = seq
-                    self.unstuck_dir = self._choose_safe_unstuck_dir(message, dodge_impassable, seq)
-
-            if self.unstuck_active and not kick and not shoot:
-                # Если основной алгоритм уже разморозил бота - сразу возвращаемся к нему.
-                if not self._is_stuck():
-                    self.unstuck_active = False
-                    self.unstuck_dir = Vec2(0.0, 0.0)
-                else:
-                    if self.unstuck_dir.length() < 1e-6:
-                        self.unstuck_dir = self._choose_safe_unstuck_dir(message, dodge_impassable, seq)
-                    if self.unstuck_dir.length() > 1e-6:
-                        tx = me.position.x + self.unstuck_dir.x * 24.0
-                        ty = me.position.y + self.unstuck_dir.y * 24.0
-                        if self.is_safe_pos(tx, ty):
-                            move = self.unstuck_dir
-                        else:
-                            self.unstuck_dir = self._choose_safe_unstuck_dir(message, dodge_impassable, seq + 3)
-
-                    # Если идти некуда — сначала стекло, потом коробки.
-                    if move.length() < 0.1:
-                        near_glass = None
-                        near_box = None
-                        best_glass_dist = float("inf")
-                        best_box_dist = float("inf")
-                        for obs in message.snapshot.obstacles:
-                            if not getattr(obs, "solid", False):
-                                continue
-                            kind = getattr(obs, "kind", "").lower()
-                            if kind not in ("glass", "box"):
-                                continue
-                            dist = me.position.distance_to(obs.center)
-                            if kind == "glass" and dist < best_glass_dist:
-                                best_glass_dist = dist
-                                near_glass = obs
-                            if kind == "box" and dist < best_box_dist:
-                                best_box_dist = dist
-                                near_box = obs
-
-                        target_obs = near_glass if near_glass is not None and best_glass_dist < 46.0 else None
-                        if target_obs is None and near_box is not None and best_box_dist < 46.0:
-                            target_obs = near_box
-                        if target_obs is not None:
-                            to_obs = Vec2(target_obs.center.x - me.position.x, target_obs.center.y - me.position.y)
-                            aim = self._safe_direction(to_obs, fallback=aim)
-                            if has_weapon and me.shoot_cooldown <= 0.05:
-                                shoot = True
-                            elif me.kick_cooldown <= 0.05:
-                                kick = True
-                            move = aim
-
-                    # Страховка: через время выбираем новое направление.
-                    if self.unstuck_started_tick >= 0 and (seq - self.unstuck_started_tick) > 45:
-                        self.unstuck_started_tick = seq
-                        self.unstuck_dir = self._choose_safe_unstuck_dir(message, dodge_impassable, seq + 5)
-
-            if self._is_stuck() and bullet_danger == 0 and nearest_tti > 0.35 and not kick and not shoot and not self.unstuck_active:
-                nearest_breakable = None
-                nearest_dist = float("inf")
-                for obs in message.snapshot.obstacles:
-                    if not getattr(obs, "solid", False):
-                        continue
-                    kind = getattr(obs, "kind", "").lower()
-                    if kind not in ("box", "glass", "letterbox"):
-                        continue
-                    dist = me.position.distance_to(obs.center)
-                    if dist < nearest_dist:
-                        nearest_dist = dist
-                        nearest_breakable = obs
-
-                if nearest_breakable is not None and nearest_dist < 55.0:
-                    to_obs = Vec2(nearest_breakable.center.x - me.position.x, nearest_breakable.center.y - me.position.y)
-                    aim = self._safe_direction(to_obs, fallback=aim)
-                    if has_weapon and me.shoot_cooldown <= 0.05:
-                        shoot = True
-                    elif me.kick_cooldown <= 0.05:
-                        kick = True
-                    move = aim
-                else:
-                    # Если рядом ломать нечего — агрессивно выходим из "залипания" в сторону врага.
-                    if enemy.alive:
-                        move = self._blend(enemy_dir, self._strafe(enemy_dir, 1.0), 0.3)
-
-            # Превентивный dodge: если противник вооружен, целится и есть прямая линия - уклоняемся заранее.
-            if enemy.alive and enemy_clear_shot and enemy_distance < 280.0 and not kick:
-                enemy_face = self._safe_direction(enemy.facing, fallback=Vec2(-enemy_dir.x, -enemy_dir.y))
-                to_me = Vec2(me.position.x - enemy.position.x, me.position.y - enemy.position.y).normalized()
-                aim_dot = enemy_face.x * to_me.x + enemy_face.y * to_me.y
-                if aim_dot > 0.86:
-                    pre_dodge = self._strafe(enemy_dir, 1.0 if seq % 2 else -1.0)
-                    move = self._blend(move if move.length() > 0.1 else pre_dodge, pre_dodge, 0.6)
-                    if enemy_distance < 75.0:
-                        shoot = False
-
-            # Глобальный hard-stop по дистанции: к вооруженному противнику не подходим вплотную.
-            if enemy.alive and enemy_armed and enemy_distance < 68.0 and not kick:
-                retreat = Vec2(-enemy_dir.x, -enemy_dir.y)
-                strafe = self._strafe(enemy_dir, 1.0 if (seq // 10) % 2 == 0 else -1.0)
-                move = self._blend(retreat, strafe, 0.24)
-                if enemy_distance < 54.0:
-                    shoot = False
 
         # === 6. ABS ТОРМОЗА И ФИНАЛЬНЫЙ ФИЛЬТР ЯМ ===
         if move.length() > 1e-6:
@@ -814,55 +538,11 @@ class SmartBot:
         else:
             move = Vec2(0.0, 0.0)
 
-        if self.resupply_focus_ticks > 0 and self.resupply_focus_pos is not None:
-            to_resupply = Vec2(self.resupply_focus_pos.x - me.position.x, self.resupply_focus_pos.y - me.position.y)
-            if to_resupply.length() > 1e-6:
-                aim = to_resupply.normalized()
-            self.resupply_focus_ticks -= 1
-        else:
-            self.resupply_focus_pos = None
-
         if aim.length() < 1e-6: aim = Vec2(1.0, 0.0)
         if kick: shoot = False
         if pickup or drop or throw_item: kick = False
 
-        command = BotCommand(
-            seq=seq,
-            move=move,
-            aim=aim,
-            shoot=shoot,
-            kick=kick,
-            pickup=pickup,
-            drop=drop,
-            throw_item=throw_item,
-        )
-        self._trace_decision(message=message, command=command, has_weapon=has_weapon, enemy_distance=enemy_distance)
-        return command
-
-    def _trace_decision(self, message: TickMessage, command: BotCommand, has_weapon: bool, enemy_distance: float) -> None:
-        if not self.trace_enabled:
-            return
-        tick = int(getattr(message, "tick", 0))
-        action_sig = (
-            round(command.move.x, 1),
-            round(command.move.y, 1),
-            bool(command.shoot),
-            bool(command.kick),
-            bool(command.pickup),
-            bool(command.throw_item),
-            bool(has_weapon),
-            int(enemy_distance // 10),
-        )
-        if self._last_trace_signature == action_sig and tick % 20 != 0:
-            return
-        self._last_trace_signature = action_sig
-        print(
-            f"[trace] tick={tick} dist={enemy_distance:.1f} "
-            f"move=({command.move.x:.2f},{command.move.y:.2f}) "
-            f"shoot={int(command.shoot)} kick={int(command.kick)} "
-            f"pickup={int(command.pickup)} throw={int(command.throw_item)}",
-            file=sys.stderr,
-        )
+        return BotCommand(seq=seq, move=move, aim=aim, shoot=shoot, kick=kick, pickup=pickup, drop=drop, throw_item=throw_item)
 
     # --- Вспомогательные методы ---
     def _safe_direction(self, vector: Vec2, fallback: Vec2) -> Vec2:
