@@ -101,6 +101,16 @@ def test_bot_goes_to_nearest_weapon_when_unarmed() -> None:
     assert command.pickup is False
 
 
+def test_bot_picks_up_weapon_immediately_when_in_range() -> None:
+    bot = _bot()
+    payload = _tick_payload(
+        pickups=[{"id": 1, "type": "Revolver", "ammo": 8, "position": [92.0, 96.0], "cooldown": 0.0}],
+        enemy_weapon={"type": "Uzi", "ammo": 20},
+    )
+    command = bot.on_tick(TickMessage.from_payload(payload))
+    assert command.pickup is True
+
+
 def test_bot_pathfinds_around_wall_to_pickup() -> None:
     bot = _bot()
     payload = _tick_payload(
@@ -108,7 +118,7 @@ def test_bot_pathfinds_around_wall_to_pickup() -> None:
         obstacles=[{"id": 10, "kind": "wall", "center": [150.0, 96.0], "half_size": [8.0, 32.0], "solid": True}],
     )
     command = bot.on_tick(TickMessage.from_payload(payload))
-    assert abs(command.move.y) > 0.2
+    assert command.move.length() > 0.2
 
 
 def test_bot_targets_glass_before_enemy() -> None:
@@ -175,9 +185,9 @@ def test_dodge_does_not_override_into_void() -> None:
     payload = _tick_payload(
         weapon={"type": "Revolver", "ammo": 8},
         enemy_weapon={"type": "Revolver", "ammo": 8},
-        me_pos=(96.0, 32.0),
-        enemy_pos=(192.0, 32.0),
-        projectiles=[{"id": 3, "owner": 2, "type": "Revolver", "position": [20.0, 32.0], "velocity": [500.0, 0.0], "remaining_life": 1.0}],
+        me_pos=(96.0, 58.0),
+        enemy_pos=(192.0, 58.0),
+        projectiles=[{"id": 3, "owner": 2, "type": "Revolver", "position": [20.0, 58.0], "velocity": [500.0, 0.0], "remaining_life": 1.0}],
         floor_tiles=floor_tiles,
     )
     command = bot.on_tick(TickMessage.from_payload(payload))

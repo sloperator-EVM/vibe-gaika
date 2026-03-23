@@ -24,7 +24,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bot-port", type=int, default=9001)
     parser.add_argument("--web-host", default="127.0.0.1")
     parser.add_argument("--web-port", type=int, default=8080)
-    parser.add_argument("--mode", choices=("bot-vs-bot", "bot-vs-human"), default="bot-vs-bot")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--level-index", type=int, default=None)
     parser.add_argument("--round-time-limit", type=float, default=None)
@@ -58,8 +57,6 @@ def main() -> int:
         server_template += f" --web-port {args.web_port}"
     if "--web-host" not in server_template:
         server_template += f" --web-host {args.web_host}"
-    if "--mode" not in server_template:
-        server_template += f" --mode {args.mode}"
     if "--seed" not in server_template:
         server_template += f" --seed {args.seed}"
     if args.level_index is not None and "--level-index" not in server_template:
@@ -69,11 +66,11 @@ def main() -> int:
 
     server_cmd = _build_cmd(server_template, args.bot_host, args.bot_port)
     bot_a_cmd = _build_cmd(args.bot_a_cmd, args.bot_host, args.bot_port)
-    bot_b_cmd = _build_cmd(args.bot_b_cmd, args.bot_host, args.bot_port) if args.mode == "bot-vs-bot" else None
+    bot_b_cmd = _build_cmd(args.bot_b_cmd, args.bot_host, args.bot_port)
 
     print("Server:", shlex.join(server_cmd))
     print("Bot A :", shlex.join(bot_a_cmd))
-    print("Bot B :", shlex.join(bot_b_cmd) if bot_b_cmd is not None else "<human player #2 via browser>")
+    print("Bot B :", shlex.join(bot_b_cmd))
     print(f"Web UI: http://{args.web_host}:{args.web_port}/")
 
     if args.dry_run:
@@ -87,9 +84,8 @@ def main() -> int:
 
         bot_a = subprocess.Popen(bot_a_cmd, cwd=workdir)
         processes.append(bot_a)
-        if bot_b_cmd is not None:
-            bot_b = subprocess.Popen(bot_b_cmd, cwd=workdir)
-            processes.append(bot_b)
+        bot_b = subprocess.Popen(bot_b_cmd, cwd=workdir)
+        processes.append(bot_b)
 
         print("Match started. Press Ctrl+C to stop all processes.")
         while True:

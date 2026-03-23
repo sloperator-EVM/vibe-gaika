@@ -188,6 +188,27 @@ class Navigator:
                 best = center
         return best
 
+    def is_floor_point(self, point: Vec2, *, margin: float = 0.0) -> bool:
+        usable_margin = max(0.0, min(TILE_SIZE * 0.5 - 1e-6, margin))
+        for cell in self.floor_cells:
+            min_x = cell.x * TILE_SIZE + usable_margin
+            max_x = (cell.x + 1) * TILE_SIZE - usable_margin
+            min_y = cell.y * TILE_SIZE + usable_margin
+            max_y = (cell.y + 1) * TILE_SIZE - usable_margin
+            if min_x <= point.x <= max_x and min_y <= point.y <= max_y:
+                return True
+        return False
+
+    def is_walkable_point(self, point: Vec2, obstacles: list[ObstacleView], *, margin: float = PLAYER_MARGIN * 0.5) -> bool:
+        if not self.is_floor_point(point, margin=margin):
+            return False
+        for obstacle in obstacles:
+            if not obstacle.solid or obstacle.kind not in SOLID_KINDS:
+                continue
+            if self._point_in_obstacle(point, obstacle, PLAYER_MARGIN * 0.5):
+                return False
+        return True
+
     def find_vantage_point(self, start: Vec2, enemy: Vec2, obstacles: list[ObstacleView]) -> Vec2:
         blocked = self.blocked_cells(obstacles)
         blocked_edges = self.blocked_edges(obstacles)
