@@ -47,6 +47,7 @@ class MatchCoordinator:
         simulation_factory: Callable[[], GameSimulation] | None = None,
         spawn_assignment_seed: int | None = None,
         series_total_rounds: int = 1,
+        manual_player_ids: set[int] | None = None,
     ) -> None:
         self.simulation = simulation
         self.auto_restart_delay_seconds = (
@@ -54,6 +55,8 @@ class MatchCoordinator:
         )
         self.simulation_factory = simulation_factory
         self.series_total_rounds = max(1, int(series_total_rounds))
+        self.manual_player_ids = {player_id for player_id in (manual_player_ids or set()) if player_id in {1, 2}}
+        self.expected_bot_count = max(0, 2 - len(self.manual_player_ids))
 
         self._lock = threading.RLock()
         self._commands: dict[int, PlayerCommand] = {1: PlayerCommand(), 2: PlayerCommand()}
@@ -175,14 +178,16 @@ class MatchCoordinator:
 
     def _assign_random_spawn_mapping(self) -> None:
         bot_ids = list(self._bots.keys())
-        if len(bot_ids) != 2:
+        available_players = [player_id for player_id in (1, 2) if player_id not in self.manual_player_ids]
+        if len(bot_ids) != len(available_players):
             self._bot_to_player = {}
             return
 
-        self._rng.shuffle(bot_ids)
+        if len(available_players) > 1:
+            self._rng.shuffle(bot_ids)
         self._bot_to_player = {
-            bot_ids[0]: 1,
-            bot_ids[1]: 2,
+            bot_id: player_id
+            for bot_id, player_id in zip(bot_ids, available_players)
         }
 
     def start(self) -> None:
@@ -206,12 +211,10 @@ class MatchCoordinator:
 
     def connect_bot(self, writer: Any) -> int | None:
         with self._lock:
-            if 1 not in self._bots:
-                bot_id = 1
-            elif 2 not in self._bots:
-                bot_id = 2
-            else:
+            available_bot_ids = [bot_id for bot_id in (1, 2) if bot_id not in self._bots]
+            if not available_bot_ids or len(self._bots) >= self.expected_bot_count:
                 return None
+            bot_id = available_bot_ids[0]
 
             endpoint = BotEndpoint(player_id=bot_id, writer=writer)
             self._bots[bot_id] = endpoint
@@ -262,14 +265,22 @@ class MatchCoordinator:
                 return
             self._commands[player_id] = cmd
 
+    def update_manual_command(self, player_id: int, payload: dict[str, Any]) -> None:
+        if player_id not in self.manual_player_ids:
+            return
+        cmd = PlayerCommand.from_payload(payload)
+        with self._lock:
+            self._commands[player_id] = cmd
+
     def get_snapshot(self) -> dict[str, Any]:
         with self._lock:
             snapshot = self.simulation.get_snapshot()
             if self._series_final_result is not None and not self._round_started:
                 snapshot["result"] = self._series_final_result
-            if not self._match_completed and len(self._bots) < 2 and not self._round_started:
+            if not self._match_completed and len(self._bots) < self.expected_bot_count and not self._round_started:
                 snapshot["status"] = "waiting_for_bots"
             snapshot["bots_connected"] = sorted(self._bots.keys())
+            snapshot["manual_player_ids"] = sorted(self.manual_player_ids)
             snapshot["bot_player_map"] = [
                 {
                     "bot_id": bot_id,
@@ -284,13 +295,21 @@ class MatchCoordinator:
                     "color": "red",
                     "player_id": 1,
                     "bot_id": player_to_bot.get(1),
-                    "bot_name": self._bot_names.get(player_to_bot.get(1, -1), None),
+                    "bot_name": (
+                        "human"
+                        if 1 in self.manual_player_ids
+                        else self._bot_names.get(player_to_bot.get(1, -1), None)
+                    ),
                 },
                 {
                     "color": "green",
                     "player_id": 2,
                     "bot_id": player_to_bot.get(2),
-                    "bot_name": self._bot_names.get(player_to_bot.get(2, -1), None),
+                    "bot_name": (
+                        "human"
+                        if 2 in self.manual_player_ids
+                        else self._bot_names.get(player_to_bot.get(2, -1), None)
+                    ),
                 },
             ]
             snapshot["series"] = self._series_snapshot()
@@ -368,7 +387,7 @@ class MatchCoordinator:
             started_at = time.perf_counter()
 
             with self._lock:
-                connected = len(self._bots) == 2
+                connected = len(self._bots) == self.expected_bot_count
 
                 if connected and not self._round_started:
                     now = time.perf_counter()

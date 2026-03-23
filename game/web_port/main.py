@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--level-index", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--round-time-limit", type=float, default=None)
+    parser.add_argument("--mode", choices=("bot-vs-bot", "bot-vs-human"), default="bot-vs-bot")
     parser.add_argument("--with-test-bots", action="store_true")
     parser.add_argument(
         "--test-bot-a",
@@ -126,6 +127,7 @@ def main() -> None:
             else None
         ),
         series_total_rounds=series_total_rounds,
+        manual_player_ids=({2} if args.mode == "bot-vs-human" else set()),
     )
 
     bot_server = BotTCPServer(args.bot_host, args.bot_port, coordinator)
@@ -147,7 +149,11 @@ def main() -> None:
         print(f"Selected level: {simulation.level.identifier} (index={last_loaded_level_index})")
     if args.with_test_bots:
         print("Auto rematch: enabled (1.0 sec after match end)")
-    print("Waiting for 2 bots to connect...")
+    if args.mode == "bot-vs-human":
+        print("Waiting for 1 bot to connect. Player 2 is controlled from the browser.")
+        print("Controls: WASD move, Left/Right rotate, Up shoot")
+    else:
+        print("Waiting for 2 bots to connect...")
 
     bot_processes: list[subprocess.Popen[bytes]] = []
 
@@ -156,10 +162,13 @@ def main() -> None:
         bot_processes.append(
             _spawn_test_bot(args.test_bot_a, bot_connect_host, args.bot_port, args.seed)
         )
-        bot_processes.append(
-            _spawn_test_bot(args.test_bot_b, bot_connect_host, args.bot_port, args.test_bot_b_seed)
-        )
-        print(f"Started test bots: {args.test_bot_a} vs {args.test_bot_b}")
+        if args.mode == "bot-vs-bot":
+            bot_processes.append(
+                _spawn_test_bot(args.test_bot_b, bot_connect_host, args.bot_port, args.test_bot_b_seed)
+            )
+            print(f"Started test bots: {args.test_bot_a} vs {args.test_bot_b}")
+        else:
+            print(f"Started test bot: {args.test_bot_a} vs human player #2")
 
     try:
         while True:
