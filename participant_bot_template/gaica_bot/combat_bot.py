@@ -207,12 +207,15 @@ class CombatBot:
         if ctx.enemy_distance < KICK_STEAL_RANGE + 8.0:
             return ctx.enemy_dir
         retreat = Vec2(-ctx.enemy_dir.x, -ctx.enemy_dir.y)
-        return self._safe_move(ctx.message, self._blend(retreat, self._strafe(ctx.enemy_dir), 0.45))
+        strafe_weight = max(0.2, min(0.65, 0.65 - aggression * 0.35))
+        return self._safe_move(ctx.message, self._blend(retreat, self._strafe(ctx.enemy_dir), strafe_weight))
 
-    def _disarmed_enemy_move(self, ctx: CombatContext) -> Vec2:
-        if ctx.enemy_distance > DISARMED_SHOT_RANGE:
-            return self._safe_move(ctx.message, self._blend(ctx.enemy_dir, self._strafe(ctx.enemy_dir), 0.15))
-        if ctx.enemy_distance < 56.0:
+    def _disarmed_enemy_move(self, ctx: CombatContext, aggression: float) -> Vec2:
+        desired_range = 72.0 + (1.0 - aggression) * 52.0
+        if ctx.enemy_distance > DISARMED_SHOT_RANGE + aggression * 35.0:
+            chase_blend = max(0.05, 0.22 - aggression * 0.12)
+            return self._safe_move(ctx.message, self._blend(ctx.enemy_dir, self._strafe(ctx.enemy_dir), chase_blend))
+        if ctx.enemy_distance < desired_range * 0.55:
             retreat = Vec2(-ctx.enemy_dir.x, -ctx.enemy_dir.y)
             retreat_blend = max(0.1, 0.28 - aggression * 0.12)
             return self._safe_move(ctx.message, self._blend(retreat, self._strafe(ctx.enemy_dir), retreat_blend))
@@ -286,6 +289,26 @@ class CombatBot:
         if path:
             return len(path) * 14.0
         return float("inf")
+
+    def _best_loot_plan(self, message: TickMessage):
+        """
+        Backward-compatible helper for mixed deployments.
+
+        Older bot builds referenced `_best_loot_plan` from `_build_context`.
+        Keep this method available so partial/stale environments do not crash
+        with AttributeError even if they still call it.
+        """
+        pickup = self._best_loot_target(message)
+        letterbox = self._nearest_ready_letterbox(message)
+        if pickup is None and letterbox is None:
+            return None
+        if pickup is None:
+            return letterbox
+        if letterbox is None:
+            return pickup
+        pickup_score = self._travel_score(message, pickup.position) + max(0.0, pickup.cooldown) * 40.0
+        box_score = self._travel_score(message, letterbox.position)
+        return pickup if pickup_score <= box_score else letterbox
 
     def _nearest_ready_letterbox(self, message: TickMessage):
         me = message.you.position
