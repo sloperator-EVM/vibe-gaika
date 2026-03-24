@@ -112,6 +112,17 @@ class PickupView:
     position: Vec2
     cooldown: float
 
+    # Backward-compat compatibility for mixed bot versions where
+    # `ctx.loot_plan` can accidentally hold a PickupView and older code
+    # expects fields `.source` and `.pickup`.
+    @property
+    def source(self) -> str:
+        return "pickup"
+
+    @property
+    def pickup(self) -> "PickupView":
+        return self
+
     @classmethod
     def from_payload(cls, payload: Any) -> "PickupView":
         if not isinstance(payload, dict):
