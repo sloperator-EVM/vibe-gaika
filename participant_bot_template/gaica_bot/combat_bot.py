@@ -27,9 +27,8 @@ BREAKABLE_KICK_RANGE = 26.0
 DISARMED_SHOT_RANGE = 110.0
 ARMED_DOOR_SHOT_RANGE = 240.0
 DODGE_LOOKAHEAD = 28.0
-VOID_MARGIN = 2.0
 VOID_EMERGENCY_MARGIN = 0.0
-THREATENED_ENEMY_RANGE = 220.0
+THREATENED_ENEMY_RANGE = 200.0
 
 
 @dataclass(slots=True)
@@ -147,21 +146,20 @@ class CombatBot:
     def _unarmed_command(self, seq: int, ctx: CombatContext) -> BotCommand:
         me = ctx.message.you
         letterbox = self._nearest_ready_letterbox(ctx.message)
-        pickup = ctx.loot_target
-
-        use_pickup = pickup is not None
-        if pickup is not None and letterbox is not None:
-            pickup_score = self._travel_score(ctx.message, pickup.position) + max(0.0, pickup.cooldown) * 40.0
+        pickup_target = ctx.loot_target
+        if pickup_target is not None and letterbox is not None:
+            pickup_score = self._travel_score(ctx.message, pickup_target.position) + max(0.0, pickup_target.cooldown) * 40.0
             box_score = self._travel_score(ctx.message, letterbox.position)
-            use_pickup = pickup_score <= box_score
+            if box_score + 4.0 < pickup_score:
+                pickup_target = None
 
-        if use_pickup and pickup is not None:
-            move = self._safe_move(ctx.message, self._move_to(ctx.message, pickup.position))
+        if pickup_target is not None:
+            move = self._safe_move(ctx.message, self._move_to(ctx.message, pickup_target.position))
             dodge = self._safe_move(ctx.message, self._dodge_move(ctx, move))
             if dodge.length() > 1e-6:
                 move = dodge
-            should_pickup = me.position.distance_to(pickup.position) <= PICKUP_RANGE and pickup.cooldown <= 0.05
-            return BotCommand(seq=seq, move=move, aim=ctx.enemy_dir, pickup=should_pickup)
+            pickup = me.position.distance_to(pickup_target.position) <= PICKUP_RANGE and pickup_target.cooldown <= 0.05
+            return BotCommand(seq=seq, move=move, aim=ctx.enemy_dir, pickup=pickup)
 
         if letterbox is not None:
             box_dir = self._safe_direction(
@@ -322,6 +320,16 @@ class CombatBot:
                 best_distance = distance
                 best = letterbox
         return best
+
+    def _travel_score(self, message: TickMessage, target: Vec2) -> float:
+        me = message.you.position
+        navigator = self.navigator
+        if navigator is None:
+            return me.distance_to(target)
+        path = navigator.path_to(me, target, message.snapshot.obstacles)
+        if path:
+            return len(path) * 14.0
+        return float("inf")
 
     def _best_vantage_target(self, message: TickMessage) -> Vec2:
         navigator = self.navigator
