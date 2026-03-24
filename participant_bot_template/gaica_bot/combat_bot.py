@@ -33,13 +33,6 @@ THREATENED_ENEMY_RANGE = 220.0
 
 
 @dataclass(slots=True)
-class LootPlan:
-    source: str
-    position: Vec2
-    pickup: PickupView | None = None
-
-
-@dataclass(slots=True)
 class CombatContext:
     message: TickMessage
     enemy_dir: Vec2
@@ -145,7 +138,7 @@ class CombatBot:
     def _pickup_command(self, seq: int, ctx: CombatContext) -> BotCommand | None:
         if ctx.has_weapon or ctx.loot_plan is None or ctx.loot_plan.source != "pickup" or ctx.loot_plan.pickup is None:
             return None
-        pickup = ctx.loot_plan.pickup
+        pickup = ctx.loot_target
         me = ctx.message.you
         if me.position.distance_to(pickup.position) <= PICKUP_RANGE and pickup.cooldown <= 0.05:
             return BotCommand(seq=seq, aim=ctx.enemy_dir, pickup=True)
@@ -153,27 +146,23 @@ class CombatBot:
 
     def _unarmed_command(self, seq: int, ctx: CombatContext) -> BotCommand:
         me = ctx.message.you
-        if ctx.loot_plan is not None:
-            move = self._safe_move(ctx.message, self._move_to(ctx.message, ctx.loot_plan.position))
+        letterbox = self._nearest_ready_letterbox(ctx.message)
+        pickup = ctx.loot_target
+
+        use_pickup = pickup is not None
+        if pickup is not None and letterbox is not None:
+            pickup_score = self._travel_score(ctx.message, pickup.position) + max(0.0, pickup.cooldown) * 40.0
+            box_score = self._travel_score(ctx.message, letterbox.position)
+            use_pickup = pickup_score <= box_score
+
+        if use_pickup and pickup is not None:
+            move = self._safe_move(ctx.message, self._move_to(ctx.message, pickup.position))
             dodge = self._safe_move(ctx.message, self._dodge_move(ctx, move))
             if dodge.length() > 1e-6:
                 move = dodge
-            pickup = (
-                ctx.loot_plan.source == "pickup"
-                and ctx.loot_plan.pickup is not None
-                and me.position.distance_to(ctx.loot_plan.pickup.position) <= PICKUP_RANGE
-                and ctx.loot_plan.pickup.cooldown <= 0.05
-            )
-            kick = (
-                ctx.loot_plan.source == "letterbox"
-                and me.position.distance_to(ctx.loot_plan.position) <= LETTERBOX_KICK_RANGE
-                and me.kick_cooldown <= 0.05
-            )
-            if kick:
-                return BotCommand(seq=seq, move=move, aim=move if move.length() > 0.0 else ctx.enemy_dir, kick=True)
-            return BotCommand(seq=seq, move=move, aim=ctx.enemy_dir, pickup=pickup)
+            should_pickup = me.position.distance_to(pickup.position) <= PICKUP_RANGE and pickup.cooldown <= 0.05
+            return BotCommand(seq=seq, move=move, aim=ctx.enemy_dir, pickup=should_pickup)
 
-        letterbox = self._nearest_ready_letterbox(ctx.message)
         if letterbox is not None:
             box_dir = self._safe_direction(
                 Vec2(letterbox.position.x - me.position.x, letterbox.position.y - me.position.y),
@@ -240,6 +229,8 @@ class CombatBot:
         if me.shoot_cooldown > 0.05 or not ctx.has_attack_lane:
             return False
         if ctx.enemy_has_weapon:
+            if ctx.has_attack_lane and ctx.enemy_distance <= 180.0:
+                return True
             return self._door_only_abuse(ctx.message) and ctx.enemy_distance <= ARMED_DOOR_SHOT_RANGE
         return ctx.enemy_distance <= DISARMED_SHOT_RANGE
 
@@ -263,21 +254,6 @@ class CombatBot:
             if score < best_score:
                 best_score = score
                 best = pickup
-        return best
-
-    def _best_loot_plan(self, message: TickMessage) -> LootPlan | None:
-        pickup = self._best_loot_target(message)
-        letterbox = self._nearest_ready_letterbox(message)
-        best: LootPlan | None = None
-        best_score = float("inf")
-        if pickup is not None:
-            pickup_score = self._travel_score(message, pickup.position) + max(0.0, pickup.cooldown) * 40.0
-            best_score = pickup_score
-            best = LootPlan(source="pickup", position=pickup.position, pickup=pickup)
-        if letterbox is not None:
-            box_score = self._travel_score(message, letterbox.position)
-            if box_score < best_score:
-                best = LootPlan(source="letterbox", position=letterbox.position)
         return best
 
     def _travel_score(self, message: TickMessage, target: Vec2) -> float:
