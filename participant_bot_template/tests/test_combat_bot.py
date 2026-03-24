@@ -121,16 +121,17 @@ def test_bot_pathfinds_around_wall_to_pickup() -> None:
     assert command.move.length() > 0.2
 
 
-def test_bot_targets_glass_before_enemy() -> None:
+def test_bot_targets_glass_with_kick_when_safe() -> None:
     bot = _bot()
     payload = _tick_payload(
         weapon={"type": "Revolver", "ammo": 8},
-        obstacles=[{"id": 10, "kind": "glass", "center": [128.0, 96.0], "half_size": [2.0, 32.0], "solid": True}],
-        enemy_pos=(192.0, 96.0),
+        enemy_weapon=None,
+        obstacles=[{"id": 10, "kind": "glass", "center": [100.0, 96.0], "half_size": [2.0, 16.0], "solid": True}],
+        enemy_pos=(220.0, 96.0),
     )
     command = bot.on_tick(TickMessage.from_payload(payload))
-    assert command.shoot is True
-    assert command.aim.x > 0.5
+    assert command.kick is True
+    assert command.shoot is False
 
 
 def test_bot_uses_letterbox_when_no_pickups_exist() -> None:
@@ -192,3 +193,27 @@ def test_dodge_does_not_override_into_void() -> None:
     )
     command = bot.on_tick(TickMessage.from_payload(payload))
     assert abs(command.move.y) < 0.2
+
+
+def test_bot_ignores_glass_breaking_when_under_threat() -> None:
+    bot = _bot()
+    payload = _tick_payload(
+        weapon={"type": "Revolver", "ammo": 8},
+        enemy_weapon={"type": "Revolver", "ammo": 8},
+        obstacles=[{"id": 10, "kind": "glass", "center": [100.0, 96.0], "half_size": [2.0, 16.0], "solid": True}],
+        enemy_pos=(170.0, 96.0),
+    )
+    command = bot.on_tick(TickMessage.from_payload(payload))
+    assert command.kick is False
+
+
+def test_bot_prefers_near_letterbox_over_far_pickup_when_unarmed() -> None:
+    bot = _bot()
+    payload = _tick_payload(
+        pickups=[{"id": 1, "type": "Revolver", "ammo": 8, "position": [260.0, 96.0], "cooldown": 0.0}],
+        me_pos=(64.0, 96.0),
+    )
+    payload["snapshot"]["letterboxes"] = [{"id": 21, "position": [92.0, 96.0], "cooldown": 0.0, "ready": True}]
+    command = bot.on_tick(TickMessage.from_payload(payload))
+    assert command.kick is True
+
