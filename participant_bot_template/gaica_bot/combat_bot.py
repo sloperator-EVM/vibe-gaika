@@ -192,17 +192,18 @@ class CombatBot:
         return BotCommand(seq=seq, move=self._safe_move(ctx.message, self._move_to(ctx.message, blocker.center)), aim=break_dir)
 
     def _combat_move(self, ctx: CombatContext) -> Vec2:
+        aggression = self._aggression_factor(ctx)
         if ctx.enemy_has_weapon and ctx.enemy_distance <= KICK_STEAL_RANGE + 12.0:
             return ctx.enemy_dir
 
         if ctx.has_attack_lane:
             if ctx.enemy_has_weapon:
-                return self._armed_enemy_move(ctx)
-            return self._disarmed_enemy_move(ctx)
+                return self._armed_enemy_move(ctx, aggression)
+            return self._disarmed_enemy_move(ctx, aggression)
 
         return self._safe_move(ctx.message, self._move_to(ctx.message, self._best_vantage_target(ctx.message)))
 
-    def _armed_enemy_move(self, ctx: CombatContext) -> Vec2:
+    def _armed_enemy_move(self, ctx: CombatContext, aggression: float) -> Vec2:
         if ctx.enemy_distance < KICK_STEAL_RANGE + 8.0:
             return ctx.enemy_dir
         retreat = Vec2(-ctx.enemy_dir.x, -ctx.enemy_dir.y)
@@ -213,7 +214,8 @@ class CombatBot:
             return self._safe_move(ctx.message, self._blend(ctx.enemy_dir, self._strafe(ctx.enemy_dir), 0.15))
         if ctx.enemy_distance < 56.0:
             retreat = Vec2(-ctx.enemy_dir.x, -ctx.enemy_dir.y)
-            return self._safe_move(ctx.message, self._blend(retreat, self._strafe(ctx.enemy_dir), 0.2))
+            retreat_blend = max(0.1, 0.28 - aggression * 0.12)
+            return self._safe_move(ctx.message, self._blend(retreat, self._strafe(ctx.enemy_dir), retreat_blend))
         return self._safe_move(ctx.message, self._strafe(ctx.enemy_dir))
 
     def _should_priority_kick(self, ctx: CombatContext) -> bool:
@@ -228,11 +230,30 @@ class CombatBot:
         me = ctx.message.you
         if me.shoot_cooldown > 0.05 or not ctx.has_attack_lane:
             return False
+        aggression = self._aggression_factor(ctx)
         if ctx.enemy_has_weapon:
-            if ctx.has_attack_lane and ctx.enemy_distance <= 180.0:
+            if ctx.has_attack_lane and ctx.enemy_distance <= 160.0 + aggression * 55.0:
                 return True
             return self._door_only_abuse(ctx.message) and ctx.enemy_distance <= ARMED_DOOR_SHOT_RANGE
-        return ctx.enemy_distance <= DISARMED_SHOT_RANGE
+        return ctx.enemy_distance <= DISARMED_SHOT_RANGE + aggression * 30.0
+
+    def _aggression_factor(self, ctx: CombatContext) -> float:
+        me = ctx.message.you
+        enemy = ctx.message.enemy
+        my_ammo = me.weapon.ammo if me.weapon is not None else 0
+        enemy_ammo = enemy.weapon.ammo if enemy.weapon is not None else 0
+        value = 0.55
+        if ctx.has_weapon and not ctx.enemy_has_weapon:
+            value += 0.2
+        if not ctx.has_weapon and ctx.enemy_has_weapon:
+            value -= 0.2
+        if my_ammo <= 2:
+            value -= 0.1
+        if enemy_ammo <= 1:
+            value += 0.1
+        if ctx.under_threat:
+            value -= 0.08
+        return max(0.15, min(0.95, value))
 
     def _best_loot_target(self, message: TickMessage) -> PickupView | None:
         me = message.you.position
