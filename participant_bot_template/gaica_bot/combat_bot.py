@@ -41,6 +41,7 @@ class CombatContext:
     needs_drop: bool
     enemy_has_weapon: bool
     loot_target: PickupView | None
+    loot_plan: LootPlan | None
     blocker: Any
     has_attack_lane: bool
     under_threat: bool
@@ -128,13 +129,14 @@ class CombatBot:
             needs_drop=needs_drop,
             enemy_has_weapon=enemy_has_weapon,
             loot_target=self._best_loot_target(message),
+            loot_plan=self._best_loot_plan(message),
             blocker=self._first_blocker(message, enemy.position),
             has_attack_lane=self._has_attack_lane(message),
             under_threat=self._is_under_threat(message, enemy_has_weapon),
         )
 
     def _pickup_command(self, seq: int, ctx: CombatContext) -> BotCommand | None:
-        if ctx.has_weapon or ctx.loot_target is None:
+        if ctx.has_weapon or ctx.loot_plan is None or ctx.loot_plan.source != "pickup" or ctx.loot_plan.pickup is None:
             return None
         pickup = ctx.loot_target
         me = ctx.message.you
@@ -205,15 +207,12 @@ class CombatBot:
         if ctx.enemy_distance < KICK_STEAL_RANGE + 8.0:
             return ctx.enemy_dir
         retreat = Vec2(-ctx.enemy_dir.x, -ctx.enemy_dir.y)
-        strafe_weight = max(0.2, min(0.65, 0.65 - aggression * 0.35))
-        return self._safe_move(ctx.message, self._blend(retreat, self._strafe(ctx.enemy_dir), strafe_weight))
+        return self._safe_move(ctx.message, self._blend(retreat, self._strafe(ctx.enemy_dir), 0.45))
 
-    def _disarmed_enemy_move(self, ctx: CombatContext, aggression: float) -> Vec2:
-        desired_range = 72.0 + (1.0 - aggression) * 52.0
-        if ctx.enemy_distance > DISARMED_SHOT_RANGE + aggression * 35.0:
-            chase_blend = max(0.05, 0.22 - aggression * 0.12)
-            return self._safe_move(ctx.message, self._blend(ctx.enemy_dir, self._strafe(ctx.enemy_dir), chase_blend))
-        if ctx.enemy_distance < desired_range * 0.55:
+    def _disarmed_enemy_move(self, ctx: CombatContext) -> Vec2:
+        if ctx.enemy_distance > DISARMED_SHOT_RANGE:
+            return self._safe_move(ctx.message, self._blend(ctx.enemy_dir, self._strafe(ctx.enemy_dir), 0.15))
+        if ctx.enemy_distance < 56.0:
             retreat = Vec2(-ctx.enemy_dir.x, -ctx.enemy_dir.y)
             retreat_blend = max(0.1, 0.28 - aggression * 0.12)
             return self._safe_move(ctx.message, self._blend(retreat, self._strafe(ctx.enemy_dir), retreat_blend))
