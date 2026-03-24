@@ -40,6 +40,7 @@ class CombatContext:
     needs_drop: bool
     enemy_has_weapon: bool
     loot_target: PickupView | None
+    loot_plan: LootPlan | None
     blocker: Any
     has_attack_lane: bool
     under_threat: bool
@@ -127,16 +128,18 @@ class CombatBot:
             needs_drop=needs_drop,
             enemy_has_weapon=enemy_has_weapon,
             loot_target=self._best_loot_target(message),
+            loot_plan=self._best_loot_plan(message),
             blocker=self._first_blocker(message, enemy.position),
             has_attack_lane=self._has_attack_lane(message),
             under_threat=self._is_under_threat(message, enemy_has_weapon),
         )
 
     def _pickup_command(self, seq: int, ctx: CombatContext) -> BotCommand | None:
-        if ctx.has_weapon or ctx.loot_target is None:
+        if ctx.has_weapon or ctx.loot_plan is None or ctx.loot_plan.source != "pickup" or ctx.loot_plan.pickup is None:
             return None
+        pickup = ctx.loot_target
         me = ctx.message.you
-        if me.position.distance_to(ctx.loot_target.position) <= PICKUP_RANGE and ctx.loot_target.cooldown <= 0.05:
+        if me.position.distance_to(pickup.position) <= PICKUP_RANGE and pickup.cooldown <= 0.05:
             return BotCommand(seq=seq, aim=ctx.enemy_dir, pickup=True)
         return None
 
@@ -187,28 +190,33 @@ class CombatBot:
         return BotCommand(seq=seq, move=self._safe_move(ctx.message, self._move_to(ctx.message, blocker.center)), aim=break_dir)
 
     def _combat_move(self, ctx: CombatContext) -> Vec2:
+        aggression = self._aggression_factor(ctx)
         if ctx.enemy_has_weapon and ctx.enemy_distance <= KICK_STEAL_RANGE + 12.0:
             return ctx.enemy_dir
 
         if ctx.has_attack_lane:
             if ctx.enemy_has_weapon:
-                return self._armed_enemy_move(ctx)
-            return self._disarmed_enemy_move(ctx)
+                return self._armed_enemy_move(ctx, aggression)
+            return self._disarmed_enemy_move(ctx, aggression)
 
         return self._safe_move(ctx.message, self._move_to(ctx.message, self._best_vantage_target(ctx.message)))
 
-    def _armed_enemy_move(self, ctx: CombatContext) -> Vec2:
+    def _armed_enemy_move(self, ctx: CombatContext, aggression: float) -> Vec2:
         if ctx.enemy_distance < KICK_STEAL_RANGE + 8.0:
             return ctx.enemy_dir
         retreat = Vec2(-ctx.enemy_dir.x, -ctx.enemy_dir.y)
-        return self._safe_move(ctx.message, self._blend(retreat, self._strafe(ctx.enemy_dir), 0.2))
+        strafe_weight = max(0.2, min(0.65, 0.65 - aggression * 0.35))
+        return self._safe_move(ctx.message, self._blend(retreat, self._strafe(ctx.enemy_dir), strafe_weight))
 
-    def _disarmed_enemy_move(self, ctx: CombatContext) -> Vec2:
-        if ctx.enemy_distance > DISARMED_SHOT_RANGE:
-            return self._safe_move(ctx.message, self._blend(ctx.enemy_dir, self._strafe(ctx.enemy_dir), 0.15))
-        if ctx.enemy_distance < 56.0:
+    def _disarmed_enemy_move(self, ctx: CombatContext, aggression: float) -> Vec2:
+        desired_range = 72.0 + (1.0 - aggression) * 52.0
+        if ctx.enemy_distance > DISARMED_SHOT_RANGE + aggression * 35.0:
+            chase_blend = max(0.05, 0.22 - aggression * 0.12)
+            return self._safe_move(ctx.message, self._blend(ctx.enemy_dir, self._strafe(ctx.enemy_dir), chase_blend))
+        if ctx.enemy_distance < desired_range * 0.55:
             retreat = Vec2(-ctx.enemy_dir.x, -ctx.enemy_dir.y)
-            return self._safe_move(ctx.message, self._blend(retreat, self._strafe(ctx.enemy_dir), 0.2))
+            retreat_blend = max(0.1, 0.28 - aggression * 0.12)
+            return self._safe_move(ctx.message, self._blend(retreat, self._strafe(ctx.enemy_dir), retreat_blend))
         return self._safe_move(ctx.message, self._strafe(ctx.enemy_dir))
 
     def _should_priority_kick(self, ctx: CombatContext) -> bool:
@@ -223,9 +231,30 @@ class CombatBot:
         me = ctx.message.you
         if me.shoot_cooldown > 0.05 or not ctx.has_attack_lane:
             return False
+        aggression = self._aggression_factor(ctx)
         if ctx.enemy_has_weapon:
+            if ctx.has_attack_lane and ctx.enemy_distance <= 160.0 + aggression * 55.0:
+                return True
             return self._door_only_abuse(ctx.message) and ctx.enemy_distance <= ARMED_DOOR_SHOT_RANGE
-        return ctx.enemy_distance <= DISARMED_SHOT_RANGE
+        return ctx.enemy_distance <= DISARMED_SHOT_RANGE + aggression * 30.0
+
+    def _aggression_factor(self, ctx: CombatContext) -> float:
+        me = ctx.message.you
+        enemy = ctx.message.enemy
+        my_ammo = me.weapon.ammo if me.weapon is not None else 0
+        enemy_ammo = enemy.weapon.ammo if enemy.weapon is not None else 0
+        value = 0.55
+        if ctx.has_weapon and not ctx.enemy_has_weapon:
+            value += 0.2
+        if not ctx.has_weapon and ctx.enemy_has_weapon:
+            value -= 0.2
+        if my_ammo <= 2:
+            value -= 0.1
+        if enemy_ammo <= 1:
+            value += 0.1
+        if ctx.under_threat:
+            value -= 0.08
+        return max(0.15, min(0.95, value))
 
     def _best_loot_target(self, message: TickMessage) -> PickupView | None:
         me = message.you.position
@@ -248,6 +277,36 @@ class CombatBot:
                 best_score = score
                 best = pickup
         return best
+
+    def _travel_score(self, message: TickMessage, target: Vec2) -> float:
+        me = message.you.position
+        navigator = self.navigator
+        if navigator is None:
+            return me.distance_to(target)
+        path = navigator.path_to(me, target, message.snapshot.obstacles)
+        if path:
+            return len(path) * 14.0
+        return float("inf")
+
+    def _best_loot_plan(self, message: TickMessage):
+        """
+        Backward-compatible helper for mixed deployments.
+
+        Older bot builds referenced `_best_loot_plan` from `_build_context`.
+        Keep this method available so partial/stale environments do not crash
+        with AttributeError even if they still call it.
+        """
+        pickup = self._best_loot_target(message)
+        letterbox = self._nearest_ready_letterbox(message)
+        if pickup is None and letterbox is None:
+            return None
+        if pickup is None:
+            return letterbox
+        if letterbox is None:
+            return pickup
+        pickup_score = self._travel_score(message, pickup.position) + max(0.0, pickup.cooldown) * 40.0
+        box_score = self._travel_score(message, letterbox.position)
+        return pickup if pickup_score <= box_score else letterbox
 
     def _nearest_ready_letterbox(self, message: TickMessage):
         me = message.you.position
@@ -409,7 +468,7 @@ class CombatBot:
             return move.length() <= 1e-6 or navigator is None
         start = message.you.position
         future = Vec2(start.x + move.x * DODGE_LOOKAHEAD, start.y + move.y * DODGE_LOOKAHEAD)
-        return navigator.is_walkable_point(future, message.snapshot.obstacles) and navigator.has_line_of_sight(
+        return navigator.is_walkable_point(future, message.snapshot.obstacles, margin=VOID_MARGIN) and navigator.has_line_of_sight(
             start,
             future,
             message.snapshot.obstacles,
