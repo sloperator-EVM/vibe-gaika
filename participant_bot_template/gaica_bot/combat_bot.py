@@ -27,6 +27,7 @@ BREAKABLE_KICK_RANGE = 26.0
 DISARMED_SHOT_RANGE = 110.0
 ARMED_DOOR_SHOT_RANGE = 240.0
 DODGE_LOOKAHEAD = 28.0
+VOID_MARGIN = 2.0
 VOID_EMERGENCY_MARGIN = 0.0
 THREATENED_ENEMY_RANGE = 200.0
 
@@ -468,7 +469,8 @@ class CombatBot:
             return move.length() <= 1e-6 or navigator is None
         start = message.you.position
         future = Vec2(start.x + move.x * DODGE_LOOKAHEAD, start.y + move.y * DODGE_LOOKAHEAD)
-        return navigator.is_walkable_point(future, message.snapshot.obstacles, margin=VOID_MARGIN) and navigator.has_line_of_sight(
+        safe_margin = float(globals().get("VOID_MARGIN", 2.0))
+        return navigator.is_walkable_point(future, message.snapshot.obstacles, margin=safe_margin) and navigator.has_line_of_sight(
             start,
             future,
             message.snapshot.obstacles,
