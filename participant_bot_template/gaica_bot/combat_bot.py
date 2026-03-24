@@ -41,6 +41,7 @@ class CombatContext:
     needs_drop: bool
     enemy_has_weapon: bool
     loot_target: PickupView | None
+    loot_plan: LootPlan | None
     blocker: Any
     has_attack_lane: bool
     under_threat: bool
@@ -128,13 +129,14 @@ class CombatBot:
             needs_drop=needs_drop,
             enemy_has_weapon=enemy_has_weapon,
             loot_target=self._best_loot_target(message),
+            loot_plan=self._best_loot_plan(message),
             blocker=self._first_blocker(message, enemy.position),
             has_attack_lane=self._has_attack_lane(message),
             under_threat=self._is_under_threat(message, enemy_has_weapon),
         )
 
     def _pickup_command(self, seq: int, ctx: CombatContext) -> BotCommand | None:
-        if ctx.has_weapon or ctx.loot_target is None:
+        if ctx.has_weapon or ctx.loot_plan is None or ctx.loot_plan.source != "pickup" or ctx.loot_plan.pickup is None:
             return None
         pickup = ctx.loot_target
         me = ctx.message.you
