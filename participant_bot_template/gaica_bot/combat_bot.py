@@ -14,7 +14,7 @@ from gaica_bot.models import (
     TickMessage,
     Vec2,
 )
-from gaica_bot.navigator import BREAKABLE_KINDS, Navigator
+from gaica_bot.navigator import Navigator
 
 
 DOOR_KINDS = {"door"}
@@ -27,6 +27,16 @@ BREAKABLE_KICK_RANGE = 26.0
 DISARMED_SHOT_RANGE = 110.0
 ARMED_DOOR_SHOT_RANGE = 240.0
 DODGE_LOOKAHEAD = 28.0
+VOID_MARGIN = 2.0
+VOID_EMERGENCY_MARGIN = 0.0
+THREATENED_ENEMY_RANGE = 220.0
+
+
+@dataclass(slots=True)
+class LootPlan:
+    source: str
+    position: Vec2
+    pickup: PickupView | None = None
 
 
 @dataclass(slots=True)
@@ -38,8 +48,10 @@ class CombatContext:
     needs_drop: bool
     enemy_has_weapon: bool
     loot_target: PickupView | None
+    loot_plan: LootPlan | None
     blocker: Any
     has_attack_lane: bool
+    under_threat: bool
 
 
 @dataclass(slots=True)
@@ -77,6 +89,9 @@ class CombatBot:
 
         self._update_stuck_state(me.position)
         ctx = self._build_context(message)
+
+        if self._is_void_emergency(ctx):
+            return BotCommand(seq=seq, move=self._void_recovery_move(ctx.message, fallback=ctx.enemy_dir), aim=ctx.enemy_dir)
 
         if self._should_priority_kick(ctx):
             return BotCommand(seq=seq, move=ctx.enemy_dir, aim=ctx.enemy_dir, kick=True)
@@ -121,26 +136,41 @@ class CombatBot:
             needs_drop=needs_drop,
             enemy_has_weapon=enemy_has_weapon,
             loot_target=self._best_loot_target(message),
+            loot_plan=self._best_loot_plan(message),
             blocker=self._first_blocker(message, enemy.position),
             has_attack_lane=self._has_attack_lane(message),
+            under_threat=self._is_under_threat(message, enemy_has_weapon),
         )
 
     def _pickup_command(self, seq: int, ctx: CombatContext) -> BotCommand | None:
-        if ctx.has_weapon or ctx.loot_target is None:
+        if ctx.has_weapon or ctx.loot_plan is None or ctx.loot_plan.source != "pickup" or ctx.loot_plan.pickup is None:
             return None
+        pickup = ctx.loot_plan.pickup
         me = ctx.message.you
-        if me.position.distance_to(ctx.loot_target.position) <= PICKUP_RANGE and ctx.loot_target.cooldown <= 0.05:
+        if me.position.distance_to(pickup.position) <= PICKUP_RANGE and pickup.cooldown <= 0.05:
             return BotCommand(seq=seq, aim=ctx.enemy_dir, pickup=True)
         return None
 
     def _unarmed_command(self, seq: int, ctx: CombatContext) -> BotCommand:
         me = ctx.message.you
-        if ctx.loot_target is not None:
-            move = self._safe_move(ctx.message, self._move_to(ctx.message, ctx.loot_target.position))
+        if ctx.loot_plan is not None:
+            move = self._safe_move(ctx.message, self._move_to(ctx.message, ctx.loot_plan.position))
             dodge = self._safe_move(ctx.message, self._dodge_move(ctx, move))
             if dodge.length() > 1e-6:
                 move = dodge
-            pickup = me.position.distance_to(ctx.loot_target.position) <= PICKUP_RANGE and ctx.loot_target.cooldown <= 0.05
+            pickup = (
+                ctx.loot_plan.source == "pickup"
+                and ctx.loot_plan.pickup is not None
+                and me.position.distance_to(ctx.loot_plan.pickup.position) <= PICKUP_RANGE
+                and ctx.loot_plan.pickup.cooldown <= 0.05
+            )
+            kick = (
+                ctx.loot_plan.source == "letterbox"
+                and me.position.distance_to(ctx.loot_plan.position) <= LETTERBOX_KICK_RANGE
+                and me.kick_cooldown <= 0.05
+            )
+            if kick:
+                return BotCommand(seq=seq, move=move, aim=move if move.length() > 0.0 else ctx.enemy_dir, kick=True)
             return BotCommand(seq=seq, move=move, aim=ctx.enemy_dir, pickup=pickup)
 
         letterbox = self._nearest_ready_letterbox(ctx.message)
@@ -158,8 +188,10 @@ class CombatBot:
         return BotCommand(seq=seq, move=move, aim=ctx.enemy_dir)
 
     def _breakable_command(self, seq: int, ctx: CombatContext) -> BotCommand | None:
+        if ctx.under_threat:
+            return None
         blocker = ctx.blocker
-        if blocker is None or blocker.kind not in BREAKABLE_KINDS:
+        if blocker is None or blocker.kind not in {"glass", "box"}:
             return None
         me = ctx.message.you
         break_dir = self._safe_direction(
@@ -168,9 +200,6 @@ class CombatBot:
         )
         if me.position.distance_to(blocker.center) <= BREAKABLE_KICK_RANGE and me.kick_cooldown <= 0.05:
             return BotCommand(seq=seq, move=break_dir, aim=break_dir, kick=True)
-        if me.shoot_cooldown <= 0.05:
-            move = self._safe_move(ctx.message, self._move_to(ctx.message, blocker.center))
-            return BotCommand(seq=seq, move=move, aim=break_dir, shoot=True)
         return BotCommand(seq=seq, move=self._safe_move(ctx.message, self._move_to(ctx.message, blocker.center)), aim=break_dir)
 
     def _combat_move(self, ctx: CombatContext) -> Vec2:
@@ -188,7 +217,7 @@ class CombatBot:
         if ctx.enemy_distance < KICK_STEAL_RANGE + 8.0:
             return ctx.enemy_dir
         retreat = Vec2(-ctx.enemy_dir.x, -ctx.enemy_dir.y)
-        return self._safe_move(ctx.message, self._blend(retreat, self._strafe(ctx.enemy_dir), 0.2))
+        return self._safe_move(ctx.message, self._blend(retreat, self._strafe(ctx.enemy_dir), 0.45))
 
     def _disarmed_enemy_move(self, ctx: CombatContext) -> Vec2:
         if ctx.enemy_distance > DISARMED_SHOT_RANGE:
@@ -235,6 +264,31 @@ class CombatBot:
                 best_score = score
                 best = pickup
         return best
+
+    def _best_loot_plan(self, message: TickMessage) -> LootPlan | None:
+        pickup = self._best_loot_target(message)
+        letterbox = self._nearest_ready_letterbox(message)
+        best: LootPlan | None = None
+        best_score = float("inf")
+        if pickup is not None:
+            pickup_score = self._travel_score(message, pickup.position) + max(0.0, pickup.cooldown) * 40.0
+            best_score = pickup_score
+            best = LootPlan(source="pickup", position=pickup.position, pickup=pickup)
+        if letterbox is not None:
+            box_score = self._travel_score(message, letterbox.position)
+            if box_score < best_score:
+                best = LootPlan(source="letterbox", position=letterbox.position)
+        return best
+
+    def _travel_score(self, message: TickMessage, target: Vec2) -> float:
+        me = message.you.position
+        navigator = self.navigator
+        if navigator is None:
+            return me.distance_to(target)
+        path = navigator.path_to(me, target, message.snapshot.obstacles)
+        if path:
+            return len(path) * 14.0
+        return float("inf")
 
     def _nearest_ready_letterbox(self, message: TickMessage):
         me = message.you.position
@@ -329,6 +383,17 @@ class CombatBot:
             best_move = candidate
         return best_move
 
+    def _is_under_threat(self, message: TickMessage, enemy_has_weapon: bool) -> bool:
+        if enemy_has_weapon and message.you.position.distance_to(message.enemy.position) <= THREATENED_ENEMY_RANGE:
+            return True
+        for projectile in message.snapshot.projectiles:
+            if projectile.owner_id == message.you.player_id:
+                continue
+            threat, _ = self._projectile_threat(message.you.position, projectile)
+            if threat > 8.0:
+                return True
+        return False
+
     def _projectile_threat(self, me_pos: Vec2, projectile: ProjectileView) -> tuple[float, Vec2]:
         rel = Vec2(me_pos.x - projectile.position.x, me_pos.y - projectile.position.y)
         speed = projectile.velocity.length()
@@ -375,11 +440,27 @@ class CombatBot:
             return move.length() <= 1e-6 or navigator is None
         start = message.you.position
         future = Vec2(start.x + move.x * DODGE_LOOKAHEAD, start.y + move.y * DODGE_LOOKAHEAD)
-        return navigator.is_walkable_point(future, message.snapshot.obstacles) and navigator.has_line_of_sight(
+        return navigator.is_walkable_point(future, message.snapshot.obstacles, margin=VOID_MARGIN) and navigator.has_line_of_sight(
             start,
             future,
             message.snapshot.obstacles,
         )
+
+    def _is_void_emergency(self, ctx: CombatContext) -> bool:
+        navigator = self.navigator
+        if navigator is None:
+            return False
+        return not navigator.is_floor_point(ctx.message.you.position, margin=VOID_EMERGENCY_MARGIN)
+
+    def _void_recovery_move(self, message: TickMessage, fallback: Vec2) -> Vec2:
+        navigator = self.navigator
+        if navigator is None:
+            return fallback
+        target = navigator.nearest_walkable_point(message.you.position, message.snapshot.obstacles)
+        if target is None:
+            return Vec2()
+        toward_safe = Vec2(target.x - message.you.position.x, target.y - message.you.position.y)
+        return self._safe_move(message, toward_safe.normalized())
 
     def _update_stuck_state(self, current: Vec2) -> None:
         if self._last_position.length() <= 1e-6:
