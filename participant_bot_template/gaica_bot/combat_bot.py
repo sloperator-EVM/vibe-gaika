@@ -224,9 +224,7 @@ class CombatBot:
         kick_ready = ctx.message.you.kick_cooldown <= 0.05
         if not kick_ready:
             return False
-        if ctx.enemy_has_weapon and ctx.enemy_distance <= KICK_STEAL_RANGE:
-            return True
-        return ctx.enemy_distance <= KICK_ABUSE_RANGE
+        return ctx.enemy_has_weapon and ctx.enemy_distance <= KICK_STEAL_RANGE
 
     def _should_shoot_enemy(self, ctx: CombatContext) -> bool:
         me = ctx.message.you
